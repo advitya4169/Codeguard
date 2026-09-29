@@ -28,7 +28,6 @@ app.get("/health", (req, res) => {
 // API Routes
 app.use("/api/review", reviewRoutes);
 app.use("/api/auth", authRoutes);
-app.use("/api/review", reviewRoutes);
 app.use("/api/github", githubRoutes);
 
 app.listen(PORT, () => {
