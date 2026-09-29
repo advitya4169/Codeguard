@@ -3,6 +3,8 @@ import cors from "cors";
 import dotenv from "dotenv";
 import connectDB from "./config/db.js";
 import reviewRoutes from "./routes/reviewRoutes.js";
+import authRoutes from "./routes/authRoutes.js";
+import githubRoutes from "./routes/githubRoutes.js";
 
 dotenv.config({ quiet: true });
 
@@ -15,6 +17,9 @@ connectDB();
 app.use(cors());
 app.use(express.json());
 
+app.use("/api/auth", authRoutes);
+app.use("/api/review", reviewRoutes);
+
 // Health Check
 app.get("/health", (req, res) => {
   res.status(200).json({ status: "ok" });
@@ -22,6 +27,9 @@ app.get("/health", (req, res) => {
 
 // API Routes
 app.use("/api/review", reviewRoutes);
+app.use("/api/auth", authRoutes);
+app.use("/api/review", reviewRoutes);
+app.use("/api/github", githubRoutes);
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
