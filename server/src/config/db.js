@@ -6,12 +6,6 @@ export const connectDB = async () => {
       throw new Error("MONGODB_URI is not defined in the .env file.");
     }
 
-    console.log("Mongo URI exists:", !!process.env.MONGODB_URI);
-    console.log(
-      "Mongo host:",
-      process.env.MONGODB_URI.split("@")[1]?.split("/")[0]
-    );
-
     const conn = await mongoose.connect(process.env.MONGODB_URI);
 
     console.log(`MongoDB Connected: ${conn.connection.host}`);
