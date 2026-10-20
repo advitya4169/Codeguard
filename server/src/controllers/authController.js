@@ -33,7 +33,6 @@ export const githubCallback = async (req, res) => {
 
     const tokenData = await tokenResponse.json();
     const accessToken = tokenData.access_token;
-
     if (!accessToken) {
       throw new Error('Failed to get GitHub access token');
     }
@@ -72,6 +71,7 @@ export const githubCallback = async (req, res) => {
     }
 
     await user.save();
+    
 
     // Create our JWT
     const sessionToken = jwt.sign(

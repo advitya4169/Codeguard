@@ -22,7 +22,6 @@ export const handleGithubWebhook = async (req, res) => {
       try {
         // 1. Look up the user in our database to get their token
         const user = await User.findOne({ githubId });
-        
         if (!user || !user.accessToken) {
           console.error(`No user or access token found for GitHub ID: ${githubId}. Cannot review PR.`);
           return;

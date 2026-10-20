@@ -11,8 +11,8 @@ export const getPRDiff = async (repoFullName, prNumber, accessToken) => {
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to fetch PR diff: ${response.statusText}`);
-  }
+  throw new Error(`Failed to fetch PR diff: ${response.status}`);
+}
 
   // A diff is plain text, not JSON
   const diffText = await response.text();
