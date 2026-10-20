@@ -6,6 +6,7 @@ import reviewRoutes from "./routes/reviewRoutes.js";
 import authRoutes from "./routes/authRoutes.js";
 import githubRoutes from "./routes/githubRoutes.js";
 import webhookRoutes from "./routes/webhookRoutes.js";
+import './workers/reviewWorker.js'; 
 dotenv.config({ quiet: true });
 
 const app = express();
