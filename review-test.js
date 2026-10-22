@@ -15,8 +15,3 @@ async function getUser(db, userId) {
   // An attacker could manipulate the query.
   return db.query("SELECT * FROM users WHERE id = " + userId);
 }
-
-function divide(a, b) {
-  // Bug: there is no check for division by zero.
-  return a / b;
-}

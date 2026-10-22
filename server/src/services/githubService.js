@@ -1,3 +1,5 @@
+//Fetches the PR diff from GitHub
+
 export const getPRDiff = async (repoFullName, prNumber, accessToken) => {
   // We use the exact URL for the Pull Request
   const url = `https://api.github.com/repos/${repoFullName}/pulls/${prNumber}`;
