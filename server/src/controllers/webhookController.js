@@ -38,7 +38,8 @@ export const handleGithubWebhook = async (req, res) => {
             commitSha,
             action,
             accessToken: user.accessToken, // <-- Passed to worker
-            userId: user._id // <-- So we can save to DB later
+            userId: user._id, // <-- So we can save to DB later
+            githubRepoId: repository.id
           },
           {
             jobId: uniqueJobId,
