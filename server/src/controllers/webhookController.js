@@ -1,13 +1,24 @@
+import crypto from 'crypto';
 import User from '../models/User.js';
 import { reviewQueue } from '../config/queue.js';
 
 export const handleGithubWebhook = async (req, res) => {
   const event = req.headers['x-github-event'];
-  
+  const signature = req.headers['x-hub-signature-256'];
   if (!req.body) {
     return res.status(400).send('No payload found');
   }
-
+  // --- NEW: CRYPTOGRAPHIC SIGNATURE VERIFICATION ---
+  // We recreate the hash using our secret and the request body, 
+  // then compare it to the hash GitHub sent.
+  const hmac = crypto.createHmac('sha256', process.env.WEBHOOK_SECRET);
+  // Express parses req.body into an object, we must stringify it back to raw JSON
+  const digest = 'sha256=' + hmac.update(JSON.stringify(req.body)).digest('hex');
+  
+  if (signature !== digest) {
+    console.error('🚨 Webhook signature mismatch! Unauthorized request blocked.');
+    return res.status(401).send('Unauthorized');
+  }
   res.status(200).send('Webhook received');
 
   if (event === 'pull_request') {
