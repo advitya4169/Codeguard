@@ -6,12 +6,16 @@ export const getRepositoryReviews = async (req, res) => {
   try {
     const { githubRepoId } = req.params;
 
-    // 1. Find the repository in our DB
-    const repository = await Repository.findOne({ githubRepoId });
+    // Scope the lookup to the authenticated user's repository records.
+    const repository = await Repository.findOne({
+      githubRepoId,
+      userId: req.user.userId,
+      isConnected: true,
+    });
     
-    // If the repo isn't in our DB yet, it just means no webhooks have fired for it.
+    // The same response covers missing and non-owned repositories.
     if (!repository) {
-      return res.status(200).json({ reviews: [] });
+      return res.status(404).json({ error: 'Repository not found' });
     }
 
     // 2. Fetch all review jobs for this repository (newest first)

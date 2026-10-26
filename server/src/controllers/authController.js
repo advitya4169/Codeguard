@@ -1,6 +1,8 @@
 import jwt from 'jsonwebtoken';
 import User from '../models/User.js';
 
+const getFrontendUrl = () => (process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/+$/, '');
+
 // Redirect user to GitHub login
 export const githubLogin = (req, res) => {
   const githubAuthUrl =
@@ -11,7 +13,14 @@ export const githubLogin = (req, res) => {
 
 // Handle GitHub callback
 export const githubCallback = async (req, res) => {
-  const { code } = req.query;
+  const { code, error: oauthError } = req.query;
+
+  if (oauthError === 'access_denied') {
+    return res.redirect(`${getFrontendUrl()}/login?error=access_denied`);
+  }
+  if (!code) {
+    return res.redirect(`${getFrontendUrl()}/login?error=auth_failed`);
+  }
 
   try {
     // Exchange code for GitHub access token
@@ -85,7 +94,7 @@ export const githubCallback = async (req, res) => {
 
     // Send JWT back to React
     res.redirect(
-      `http://localhost:5173/login/success?token=${sessionToken}`
+      `${getFrontendUrl()}/login/success?token=${sessionToken}`
     );
 
   } catch (error) {
@@ -93,7 +102,7 @@ export const githubCallback = async (req, res) => {
 
     // Redirect if login fails
     res.redirect(
-      'http://localhost:5173/login?error=auth_failed'
+      `${getFrontendUrl()}/login?error=auth_failed`
     );
   }
 };
