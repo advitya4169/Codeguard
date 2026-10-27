@@ -7,6 +7,7 @@ import { redisConnection } from "../config/queue.js";
 import { getPRDiff, postPRComment } from '../services/githubService.js';
 import { getInstallationAccessToken } from '../services/githubAppService.js';
 import { cleanDiff } from "../analyzers/staticAnalyzer.js";
+import { validateFindingsAgainstDiff } from "../analyzers/diffFindingValidator.js";
 
 import ReviewJob from "../models/ReviewJob.js";
 import Finding from "../models/Finding.js";
@@ -53,9 +54,9 @@ Identify genuine:
 - Code quality problems
 - Maintainability issues
 
-Do not invent findings. Report only problems supported by the diff.
-Use paths from the diff and line numbers when identifiable.
-Use lineNumber 0 when the line cannot be determined.
+Base every finding on specific code shown in the supplied diff. Start each explanation with Evidence: followed by an exact short code excerpt enclosed in backticks, then a dash and how that code causes the issue. Do not infer behavior in files or code the diff does not show, or report claims contradicted by the diff.
+Use an exact file path and the new-side line containing the cited code. Prefer the actual vulnerable statement over nearby braces, imports, or declarations. If no reliable location is visible, omit the finding.
+Do not claim syntax errors, undefined variables, incomplete implementations, or filename conflicts without direct evidence. Check that a claimed undefined name is not declared in the shown code. Test and fixture files remain valid review targets; describe risks in their test/example context and do not imply production impact without evidence.
 If no genuine issues exist, return an empty findings array.
 
 Return exactly one JSON object in this format:
@@ -66,7 +67,7 @@ Return exactly one JSON object in this format:
       "severity": "high",
       "filePath": "src/example.js",
       "lineNumber": 10,
-      "explanation": "Explain the issue",
+      "explanation": "Evidence: [exact code excerpt in backticks] — explain how it causes the issue",
       "suggestedFix": "Explain how to fix it"
     }
   ]
@@ -87,7 +88,7 @@ ${diff}
       {
         role: "system",
         content:
-          "You are an expert code reviewer. Return one valid JSON object with a findings array. Each finding must include category, severity, filePath, lineNumber, explanation, and suggestedFix. Never invent issues. Return only JSON.",
+          "You are an expert code reviewer. Review only evidence present in the supplied diff. Return one valid JSON object with a findings array. Each finding must include category, severity, exact diff filePath, positive new-side diff lineNumber, explanation, and suggestedFix. Start explanation with Evidence: `exact short code excerpt from the cited line` — then explain how that code causes the issue. Do not invent or speculate; reject claims contradicted by the diff. Do not claim syntax errors, undefined variables, incomplete implementations, or filename conflicts without direct evidence. Assess test/fixture code in its actual context and do not imply production impact without evidence. Omit findings without a reliable location. Return only JSON.",
       },
       {
         role: "user",
@@ -363,7 +364,8 @@ export const createReviewProcessor = ({
       // 5. Analyze the diff using Groq.
       console.log("- Requesting Groq AI analysis...");
 
-      const findings = await analyzeDiffFn(cleanCodeDiff);
+      const aiFindings = await analyzeDiffFn(cleanCodeDiff);
+      const findings = validateFindingsAgainstDiff(aiFindings, cleanCodeDiff);
 
       await job.updateProgress(80);
 
