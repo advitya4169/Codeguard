@@ -357,7 +357,8 @@ const normalizeInstallationRepository = (repository) => {
     typeof repository.full_name !== 'string' ||
     typeof repository.private !== 'boolean' ||
     typeof repository.html_url !== 'string' ||
-    typeof repository.owner?.login !== 'string'
+    typeof repository.owner?.login !== 'string' ||
+    (typeof repository.owner?.id !== 'number' && typeof repository.owner?.id !== 'string')
   ) {
     throw new Error('GitHub returned invalid installation repository details.');
   }
@@ -370,6 +371,7 @@ const normalizeInstallationRepository = (repository) => {
     id: repository.id,
     name,
     owner: repository.owner.login,
+    ownerId: String(repository.owner.id),
     fullName: repository.full_name,
     private: repository.private,
     url: repository.html_url,

@@ -1,5 +1,6 @@
 import Installation from '../models/Installation.js';
 import Repository from '../models/Repository.js';
+import User from '../models/User.js';
 import {
   getInstallationAccessToken,
   getInstallationRepositoriesPage,
@@ -33,6 +34,7 @@ const repositoryResponse = (repository) => ({
 export const createGitHubAppRepositoryController = ({
   InstallationModel = Installation,
   RepositoryModel = Repository,
+  UserModel = User,
   api = {
     getInstallationAccessToken,
     getRepositoriesPage: getInstallationRepositoriesPage,
@@ -102,6 +104,11 @@ export const createGitHubAppRepositoryController = ({
         });
       }
 
+      const user = await UserModel.findById(req.user.userId).select('githubId').lean();
+      if (!user?.githubId) {
+        return res.status(404).json({ error: 'CodeGuard user not found' });
+      }
+
       const tokenResult = await api.getInstallationAccessToken(installationId);
       const repositoryPage = await api.getRepositoriesPage(tokenResult.token, page);
       const connectedRepositories = await RepositoryModel.find({
@@ -119,6 +126,7 @@ export const createGitHubAppRepositoryController = ({
       return res.status(200).json({
         repositories: repositoryPage.repositories.map((repository) => ({
           ...repositoryResponse(repository),
+          ownedByAuthenticatedUser: String(repository.ownerId) === String(user.githubId),
           connected: connectionTypes.has(repository.id),
           ...(connectionTypes.get(repository.id) || {}),
         })),
@@ -160,10 +168,9 @@ export const createGitHubAppRepositoryController = ({
       const userId = req.user.userId;
       let repository = await RepositoryModel.findOne({ githubRepoId: verified.id });
       if (repository) {
-        if (
-          String(repository.userId) !== String(userId) ||
-          repository.installationId !== installationId
-        ) {
+        if (String(repository.userId) !== String(userId) || (
+          repository.installationId && repository.installationId !== installationId
+        )) {
           return res.status(409).json({
             error: 'Repository is already connected through another account or integration',
             code: 'REPOSITORY_OWNERSHIP_CONFLICT',
@@ -173,6 +180,7 @@ export const createGitHubAppRepositoryController = ({
         repository.owner = verified.owner;
         repository.name = verified.name;
         repository.fullName = verified.fullName;
+        repository.installationId = installationId;
         repository.isConnected = true;
         await repository.save();
       } else {
@@ -192,7 +200,7 @@ export const createGitHubAppRepositoryController = ({
           if (
             !repository ||
             String(repository.userId) !== String(userId) ||
-            repository.installationId !== installationId
+            (repository.installationId && repository.installationId !== installationId)
           ) {
             return res.status(409).json({
               error: 'Repository is already connected through another account or integration',
@@ -203,6 +211,7 @@ export const createGitHubAppRepositoryController = ({
           repository.owner = verified.owner;
           repository.name = verified.name;
           repository.fullName = verified.fullName;
+          repository.installationId = installationId;
           repository.isConnected = true;
           await repository.save();
         }

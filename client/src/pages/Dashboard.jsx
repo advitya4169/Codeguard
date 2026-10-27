@@ -4,9 +4,10 @@ import {
   Activity,
   AlertCircle,
   AlertTriangle,
-  ArrowRight,
   ArrowUpRight,
   BookMarked,
+  ChevronLeft,
+  ChevronRight,
   CalendarDays,
   CheckCircle,
   CircleDot,
@@ -18,7 +19,8 @@ import {
   Info,
   Loader2,
   LogOut,
-  LockKeyhole,
+  PanelLeftClose,
+  PanelLeftOpen,
   RefreshCw,
   Search,
   ShieldAlert,
@@ -32,6 +34,7 @@ import { requestReviewHistory } from '../utils/reviewHistory.js';
 
 const SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'suggestion'];
 const REVIEW_POLL_INTERVAL_MS = 5000;
+const SIDEBAR_REPOSITORIES_PER_PAGE = 12;
 
 const GITHUB_APP_CALLBACK_MESSAGES = {
   connected: 'GitHub App connected. Choose an installation repository below to enable reviews.',
@@ -98,6 +101,57 @@ function ReviewStatus({ status }) {
   );
 }
 
+function mergeRepositorySources(oauthRepositories, appRepositories) {
+  const sourcesByName = new Map();
+  const addSource = (repository, source) => {
+    const fullName = repository.fullName?.trim();
+    if (!fullName) return;
+
+    const key = fullName.toLocaleLowerCase();
+    const sources = sourcesByName.get(key) || {};
+    sources[source] = repository;
+    sourcesByName.set(key, sources);
+  };
+
+  oauthRepositories.forEach((repository) => addSource(repository, 'oauth'));
+  appRepositories.forEach((repository) => addSource(repository, 'app'));
+
+  return Array.from(sourcesByName.values(), (sources) => {
+    const oauthRepository = sources.oauth;
+    const appRepository = sources.app;
+    const connectedRepository = [appRepository, oauthRepository]
+      .find((repository) => repository?.connected);
+    const primaryRepository = connectedRepository || appRepository || oauthRepository;
+
+    return {
+      ...primaryRepository,
+      connected: Boolean(connectedRepository),
+      connectionType: connectedRepository
+        ? connectedRepository.connectionType || (connectedRepository === appRepository ? 'github_app' : 'oauth')
+        : appRepository ? 'github_app' : 'oauth',
+      installationId: connectedRepository
+        ? connectedRepository.installationId
+        : appRepository?.installationId,
+      private: appRepository?.private ?? oauthRepository?.private ?? primaryRepository.private,
+      availableViaApp: Boolean(appRepository),
+      availableViaOAuth: Boolean(oauthRepository),
+      appRepository,
+      oauthRepository,
+    };
+  });
+}
+
+function mergeLoadedRepositories(existingRepositories, incomingRepositories) {
+  const repositoriesById = new Map(existingRepositories.map((repository) => [
+    String(repository.id),
+    repository,
+  ]));
+  incomingRepositories.forEach((repository) => {
+    repositoriesById.set(String(repository.id), repository);
+  });
+  return Array.from(repositoriesById.values());
+}
+
 export default function Dashboard() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -110,10 +164,13 @@ export default function Dashboard() {
   const [repoRetry, setRepoRetry] = useState(0);
   const [repoPage, setRepoPage] = useState(1);
   const [repoHasNextPage, setRepoHasNextPage] = useState(false);
-  const [repoSearch, setRepoSearch] = useState('');
   const [selectedRepo, setSelectedRepo] = useState(null);
-  const [connectingRepoId, setConnectingRepoId] = useState(null);
-  const [connectError, setConnectError] = useState('');
+  const [repositoryManagerOpen, setRepositoryManagerOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [sidebarPage, setSidebarPage] = useState(1);
+  const [manageRepositoriesPage, setManageRepositoriesPage] = useState(1);
+  const [repositorySearch, setRepositorySearch] = useState('');
 
   // GitHub App installation and repository selection state.
   const [githubAppNotice, setGithubAppNotice] = useState(() => {
@@ -134,7 +191,6 @@ export default function Dashboard() {
   const [appRepoRetry, setAppRepoRetry] = useState(0);
   const [appRepoPage, setAppRepoPage] = useState(1);
   const [appRepoHasNextPage, setAppRepoHasNextPage] = useState(false);
-  const [appRepoSearch, setAppRepoSearch] = useState('');
   const [connectingAppRepoId, setConnectingAppRepoId] = useState(null);
   const [appConnectError, setAppConnectError] = useState('');
 
@@ -243,17 +299,17 @@ export default function Dashboard() {
         if (!Array.isArray(data.repositories)) {
           throw new Error('The server returned an unexpected App repository response.');
         }
-        setAppRepos(data.repositories.map((repository) => ({
+        const fetchedRepositories = data.repositories.map((repository) => ({
           ...repository,
           connectionType: repository.connected ? repository.connectionType || 'github_app' : null,
           installationId: repository.connected
             ? repository.installationId
             : selectedInstallationId,
-        })));
+        }));
+        setAppRepos((current) => mergeLoadedRepositories(current, fetchedRepositories));
         setAppRepoHasNextPage(Boolean(data.pagination?.hasNextPage));
       } catch (error) {
         if (error.name !== 'AbortError') {
-          setAppRepos([]);
           setAppRepoHasNextPage(false);
           setAppRepoError(error.message || 'Could not load App repositories.');
         }
@@ -264,8 +320,6 @@ export default function Dashboard() {
     fetchAppRepositories();
     return () => controller.abort();
   }, [selectedInstallationId, selectedInstallation?.status, appRepoPage, appRepoRetry, handleUnauthorized]);
-
-  const filteredAppRepos = filterRepositories(appRepos, appRepoSearch);
 
   // Fetch Repositories on mount
   useEffect(() => {
@@ -308,11 +362,10 @@ export default function Dashboard() {
           throw new Error('The server returned an unexpected repository response.');
         }
 
-        setRepos(data.repositories);
+        setRepos((current) => mergeLoadedRepositories(current, data.repositories));
         setRepoHasNextPage(Boolean(data.pagination?.hasNextPage));
       } catch (err) {
         if (err.name !== 'AbortError') {
-          setRepos([]);
           setRepoHasNextPage(false);
           setRepoError(err.message || 'Could not load repositories.');
         }
@@ -325,10 +378,38 @@ export default function Dashboard() {
     return () => controller.abort();
   }, [handleUnauthorized, repoPage, repoRetry]);
 
-  const filteredRepos = filterRepositories(repos, repoSearch);
-  const selectedRepoUsesApp = Boolean(
-    selectedRepo?.connectionType === 'github_app' || selectedRepo?.installationId,
+  const mergedRepositories = mergeRepositorySources(repos, appRepos);
+  const ownedRepositories = mergedRepositories.filter(
+    (repository) => repository.ownedByAuthenticatedUser === true,
   );
+  const filteredRepositories = filterRepositories(ownedRepositories, repositorySearch);
+  const sidebarPageCount = Math.max(1, Math.ceil(filteredRepositories.length / SIDEBAR_REPOSITORIES_PER_PAGE));
+  const currentSidebarPage = Math.min(sidebarPage, sidebarPageCount);
+  const sidebarRepositories = filteredRepositories.slice(
+    (currentSidebarPage - 1) * SIDEBAR_REPOSITORIES_PER_PAGE,
+    currentSidebarPage * SIDEBAR_REPOSITORIES_PER_PAGE,
+  );
+  const manageRepositoriesPageCount = Math.max(
+    1,
+    Math.ceil(filteredRepositories.length / SIDEBAR_REPOSITORIES_PER_PAGE),
+  );
+  const currentManageRepositoriesPage = Math.min(
+    manageRepositoriesPage,
+    manageRepositoriesPageCount,
+  );
+  const managedRepositories = filteredRepositories.slice(
+    (currentManageRepositoriesPage - 1) * SIDEBAR_REPOSITORIES_PER_PAGE,
+    currentManageRepositoriesPage * SIDEBAR_REPOSITORIES_PER_PAGE,
+  );
+  const appRepositoriesHaveNextPage = Boolean(
+    appRepoHasNextPage && selectedInstallation?.status === 'active',
+  );
+  const moreRepositorySourcesAvailable = repoHasNextPage || appRepositoriesHaveNextPage;
+  const canAdvanceManageRepositories = (
+    currentManageRepositoriesPage < manageRepositoriesPageCount || moreRepositorySourcesAvailable
+  );
+  const selectedRepoUsesApp = selectedRepo?.connectionType === 'github_app';
+  const selectedRepoAppConnected = Boolean(selectedRepo?.connected && selectedRepoUsesApp);
 
   const fetchReviewHistory = useCallback(async (repository, signal) => {
     try {
@@ -349,7 +430,7 @@ export default function Dashboard() {
 
   // Fetch saved history when a connected repository is selected or retried.
   useEffect(() => {
-    if (!selectedRepo?.connected) return undefined;
+    if (!selectedRepoAppConnected) return undefined;
 
     const controller = new AbortController();
     const requestTimeout = setTimeout(async () => {
@@ -364,11 +445,11 @@ export default function Dashboard() {
       clearTimeout(requestTimeout);
       controller.abort();
     };
-  }, [selectedRepo, handleUnauthorized, reviewsRetry, fetchReviewHistory]);
+  }, [selectedRepo, selectedRepoAppConnected, handleUnauthorized, reviewsRetry, fetchReviewHistory]);
 
   // Refresh only while persisted reviews report an active worker state.
   useEffect(() => {
-    if (!selectedRepo?.connected || !hasActiveReviews(reviews)) return undefined;
+    if (!selectedRepoAppConnected || !hasActiveReviews(reviews)) return undefined;
 
     const controller = new AbortController();
     let pollInProgress = false;
@@ -386,11 +467,27 @@ export default function Dashboard() {
       controller.abort();
       clearInterval(intervalId);
     };
-  }, [selectedRepo, reviews, fetchReviewHistory]);
+  }, [selectedRepo, selectedRepoAppConnected, reviews, fetchReviewHistory]);
 
   const handleLogout = () => {
     localStorage.removeItem('codeguard_token');
     navigate('/login');
+  };
+
+  const selectRepository = (repository) => {
+    setSelectedRepo(repository);
+    const repositoryIndex = filteredRepositories.findIndex((item) => (
+      item.fullName?.toLocaleLowerCase() === repository.fullName?.toLocaleLowerCase()
+    ));
+    if (repositoryIndex >= 0) {
+      setSidebarPage(Math.floor(repositoryIndex / SIDEBAR_REPOSITORIES_PER_PAGE) + 1);
+    }
+    setRepositoryManagerOpen(false);
+    setMobileSidebarOpen(false);
+    setAppConnectError('');
+    setReviews([]);
+    setReviewsError('');
+    setLoadingReviews(Boolean(repository.connected));
   };
 
   const retryReviewHistory = () => {
@@ -438,7 +535,12 @@ export default function Dashboard() {
   };
 
   const handleConnectAppRepository = async (repo) => {
-    if (!selectedInstallationId || repo.connected) return;
+    if (repo.connected && repo.connectionType === 'github_app') return;
+    if (!selectedInstallationId) {
+      setAppConnectError('Install or select an active GitHub App installation before connecting a repository.');
+      setRepositoryManagerOpen(true);
+      return;
+    }
     setConnectingAppRepoId(repo.id);
     setAppConnectError('');
     try {
@@ -496,53 +598,6 @@ export default function Dashboard() {
     }
   };
 
-  const handleConnectRepository = async (repo) => {
-    setConnectingRepoId(repo.id);
-    setConnectError('');
-
-    try {
-      const token = localStorage.getItem('codeguard_token');
-      const response = await fetch(apiUrl('/api/github/repos/connect'), {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ repositoryId: repo.id }),
-      });
-
-      if (response.status === 401) {
-        handleUnauthorized();
-        return;
-      }
-
-      let data = {};
-      try {
-        data = await response.json();
-      } catch {
-        // The status below still reports a useful error for an invalid body.
-      }
-      if (!response.ok) {
-        throw new Error(data.error || `Could not connect repository (HTTP ${response.status}).`);
-      }
-
-      const connectedRepo = { ...repo, connected: true, connectionType: 'oauth' };
-      setRepos((currentRepos) => currentRepos.map((item) => (
-        item.id === repo.id ? connectedRepo : item
-      )));
-      if (selectedRepo?.id === repo.id) {
-        setReviews([]);
-        setReviewsError('');
-        setLoadingReviews(true);
-        setSelectedRepo(connectedRepo);
-      }
-    } catch (error) {
-      setConnectError(error.message || 'Could not connect repository.');
-    } finally {
-      setConnectingRepoId(null);
-    }
-  };
-
   return (
     <div className="min-h-screen bg-[#090e1b] font-sans text-slate-100 selection:bg-indigo-500/30">
       <div className="pointer-events-none fixed inset-0 overflow-hidden" aria-hidden="true">
@@ -563,6 +618,26 @@ export default function Dashboard() {
           </div>
 
           <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setMobileSidebarOpen((open) => !open)}
+              aria-expanded={mobileSidebarOpen}
+              aria-controls="repository-navigation"
+              className="inline-flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs font-medium text-slate-300 hover:bg-slate-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 lg:hidden"
+            >
+              <BookMarked className="h-3.5 w-3.5" aria-hidden="true" /> Browse
+            </button>
+            <button
+              type="button"
+              onClick={() => setRepositoryManagerOpen((open) => !open)}
+              aria-expanded={repositoryManagerOpen}
+              aria-controls="repository-manager"
+              className="inline-flex items-center gap-2 rounded-lg border border-indigo-400/20 bg-indigo-500/10 px-3 py-2 text-xs font-medium text-indigo-200 transition hover:border-indigo-300/40 hover:bg-indigo-500/15 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
+            >
+              <BookMarked className="h-3.5 w-3.5" aria-hidden="true" />
+              <span className="hidden sm:inline">{repositoryManagerOpen ? 'Close repositories' : 'Manage repositories'}</span>
+              <span className="sm:hidden">Repositories</span>
+            </button>
             <span className="hidden items-center gap-2 rounded-full border border-slate-800 bg-slate-900/70 px-3 py-1.5 text-xs text-slate-400 sm:inline-flex">
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden="true" />
               Authenticated
@@ -579,10 +654,10 @@ export default function Dashboard() {
         </div>
       </header>
 
-      <main className="relative mx-auto grid max-w-[1600px] gap-5 px-4 py-5 sm:px-6 sm:py-7 lg:grid-cols-[280px_minmax(0,1fr)] lg:px-8">
+      <main className="relative mx-auto max-w-[1600px] space-y-5 px-4 py-5 sm:px-6 sm:py-7 lg:px-8">
         {githubAppNotice && (
           <div
-            className={`flex items-start gap-2.5 rounded-xl border px-4 py-3 text-sm lg:col-span-2 ${githubAppNotice.startsWith('GitHub App connected.') ? 'border-emerald-400/20 bg-emerald-400/5 text-emerald-100' : 'border-indigo-400/20 bg-indigo-400/5 text-indigo-100'}`}
+            className={`flex items-start gap-2.5 rounded-xl border px-4 py-3 text-sm ${githubAppNotice.startsWith('GitHub App connected.') ? 'border-emerald-400/20 bg-emerald-400/5 text-emerald-100' : 'border-indigo-400/20 bg-indigo-400/5 text-indigo-100'}`}
             role="status"
             aria-live="polite"
           >
@@ -598,363 +673,98 @@ export default function Dashboard() {
             </button>
           </div>
         )}
-        <aside className="h-fit rounded-2xl border border-slate-800/90 bg-slate-950/75 shadow-xl shadow-black/10 lg:sticky lg:top-[84px]">
-          <div className="border-b border-slate-800/80 p-4">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <h2 className="text-sm font-semibold text-slate-100">GitHub App</h2>
-                <p className="mt-1 text-[11px] leading-relaxed text-slate-500">
-                  Install the App to choose repositories for CodeGuard PR reviews.
-                </p>
-              </div>
-              <FaGithub className="mt-0.5 h-4 w-4 shrink-0 text-violet-300" aria-hidden="true" />
+        <div className={'grid min-w-0 gap-4 lg:items-start ' + (sidebarCollapsed ? 'lg:grid-cols-[4.5rem_minmax(0,1fr)]' : 'lg:grid-cols-[16rem_minmax(0,1fr)]')}>
+          <aside id="repository-navigation" aria-label="Repository navigation" className={(mobileSidebarOpen ? 'block' : 'hidden') + ' min-w-0 rounded-2xl border border-slate-800/90 bg-slate-950/75 p-3 shadow-xl shadow-black/10 lg:block ' + (sidebarCollapsed ? 'lg:p-2' : 'sm:p-4')}>
+            <div className={'flex items-center ' + (sidebarCollapsed ? 'lg:flex-col lg:gap-3' : 'justify-between gap-2')}>
+              {!sidebarCollapsed && <div className="min-w-0"><p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-indigo-300">CodeGuard</p><h2 className="mt-1 text-sm font-semibold text-white">Repositories</h2></div>}
+              <button type="button" onClick={() => setSidebarCollapsed((collapsed) => !collapsed)} aria-label={sidebarCollapsed ? 'Expand repository sidebar' : 'Collapse repository sidebar'} title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'} className="hidden rounded-lg border border-slate-800 bg-slate-900 p-2 text-slate-400 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 lg:inline-flex">
+                {sidebarCollapsed ? <PanelLeftOpen className="h-4 w-4" aria-hidden="true" /> : <PanelLeftClose className="h-4 w-4" aria-hidden="true" />}
+              </button>
+              <button type="button" onClick={() => setMobileSidebarOpen(false)} className="rounded px-2 py-1 text-xs text-slate-400 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 lg:hidden">Close</button>
             </div>
-            <button
-              type="button"
-              onClick={handleStartGitHubAppInstall}
-              disabled={startingAppInstall}
-              className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-lg border border-violet-400/20 bg-violet-500/10 px-3 py-2 text-xs font-semibold text-violet-200 transition hover:border-violet-300/40 hover:bg-violet-500/15 disabled:cursor-wait disabled:opacity-60 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-300"
-            >
-              {startingAppInstall ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : <ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" />}
-              {startingAppInstall ? 'Opening GitHub…' : installations.length ? 'Install or manage GitHub App' : 'Install GitHub App'}
-            </button>
-
-            {loadingInstallations ? (
-              <p className="mt-3 flex items-center gap-2 text-xs text-slate-500" role="status">
-                <Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-400" aria-hidden="true" /> Checking App installations…
-              </p>
-            ) : installationError ? (
-              <div className="mt-3 rounded-lg border border-red-400/20 bg-red-400/5 p-3" role="alert">
-                <p className="text-xs leading-relaxed text-red-100">{installationError}</p>
-                <button
-                  type="button"
-                  onClick={() => setInstallationRetry((attempt) => attempt + 1)}
-                  className="mt-2 inline-flex items-center gap-1.5 text-xs font-medium text-indigo-300 hover:text-indigo-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
-                >
-                  <RefreshCw className="h-3 w-3" aria-hidden="true" /> Retry
-                </button>
-              </div>
-            ) : installations.length === 0 ? (
-              <p className="mt-3 text-[11px] leading-relaxed text-slate-500">
-                No GitHub App installation is linked yet. Install the App, then return here to choose repositories.
-              </p>
-            ) : (
-              <>
-                <label htmlFor="github-app-installation" className="mt-3 block text-[10px] font-semibold uppercase tracking-wider text-slate-500">
-                  Installation
-                </label>
-                <select
-                  id="github-app-installation"
-                  value={selectedInstallationId}
-                  onChange={(event) => {
-                    setSelectedInstallationId(event.target.value);
-                    setAppRepoPage(1);
-                    setAppRepoSearch('');
-                    setAppConnectError('');
-                    setAppRepos([]);
-                    setAppRepoHasNextPage(false);
-                    setAppRepoError('');
-                  }}
-                  className="mt-1.5 w-full rounded-lg border border-slate-800 bg-slate-900 px-2.5 py-2 text-xs text-slate-200 focus:border-indigo-400/50 focus:outline-none focus:ring-2 focus:ring-indigo-400/20"
-                >
-                  {installations.map((installation) => (
-                    <option key={installation.installationId} value={installation.installationId}>
-                      {installation.accountLogin} · {installation.status}
-                    </option>
-                  ))}
-                </select>
-
-                {selectedInstallation?.status !== 'active' ? (
-                  <div className="mt-3 rounded-lg border border-amber-400/15 bg-amber-400/5 p-3">
-                    <p className="text-xs leading-relaxed text-amber-100">
-                      This installation is {selectedInstallation?.status || 'unavailable'} and cannot provide repositories. Reinstall or restore the App access in GitHub.
-                    </p>
+            {!sidebarCollapsed && <>
+              <label htmlFor="workspace-repository-search" className="sr-only">Search repositories currently loaded</label>
+              <div className="relative mt-4"><Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" aria-hidden="true" /><input id="workspace-repository-search" type="search" value={repositorySearch} onChange={(event) => { setRepositorySearch(event.target.value); setSidebarPage(1); }} placeholder="Search repositories…" className="w-full rounded-lg border border-slate-800 bg-slate-900/70 py-2 pl-8 pr-2 text-xs text-slate-200 placeholder:text-slate-600 focus:border-indigo-400/50 focus:outline-none focus:ring-2 focus:ring-indigo-400/20" /></div>
+              <p className="mt-1.5 text-[10px] text-slate-600">Searches loaded results</p>
+            </>}
+            <div className={'mt-3 space-y-1 ' + (sidebarCollapsed ? 'lg:mt-4' : '')}>
+              {sidebarRepositories.map((repository) => <button key={repository.fullName.toLocaleLowerCase()} type="button" onClick={() => selectRepository(repository)} aria-pressed={selectedRepo?.fullName?.toLocaleLowerCase() === repository.fullName.toLocaleLowerCase()} title={sidebarCollapsed ? repository.fullName : undefined} className={'flex w-full min-w-0 items-center rounded-lg border px-2.5 py-2 text-left transition focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 ' + (selectedRepo?.fullName?.toLocaleLowerCase() === repository.fullName.toLocaleLowerCase() ? 'border-indigo-400/30 bg-indigo-500/[0.10] text-white' : 'border-transparent text-slate-300 hover:border-slate-800 hover:bg-slate-900/70') + (sidebarCollapsed ? ' lg:justify-center lg:px-1' : '')}>
+                <span className={'min-w-0 flex-1 truncate text-xs font-medium ' + (sidebarCollapsed ? 'lg:hidden' : '')}>{repository.name}</span>
+                {sidebarCollapsed && <span className="hidden text-[10px] font-semibold text-indigo-200 lg:inline" aria-hidden="true">{repository.name.slice(0, 1).toUpperCase()}</span>}
+              </button>)}
+              {sidebarRepositories.length === 0 && <p className="px-2 py-3 text-xs leading-relaxed text-slate-500" role="status">{loadingRepos || loadingAppRepos ? 'Loading repositories…' : repositorySearch.trim() ? 'No loaded repositories match your search.' : 'No repositories loaded yet.'}</p>}
+              {filteredRepositories.length > SIDEBAR_REPOSITORIES_PER_PAGE && (
+                <div className={'flex items-center justify-between border-t border-slate-800/80 px-1 pt-2 ' + (sidebarCollapsed ? 'lg:flex-col lg:gap-2' : '')}>
+                  {!sidebarCollapsed && <span className="text-[10px] tabular-nums text-slate-500">{filteredRepositories.length} repositories</span>}
+                  <div className="flex items-center gap-1.5">
+                    <button type="button" onClick={() => setSidebarPage((page) => Math.max(1, page - 1))} disabled={currentSidebarPage === 1} aria-label="Previous repository page" className="rounded-md border border-slate-800 p-1 text-slate-400 hover:bg-slate-900 hover:text-white disabled:opacity-35 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"><ChevronLeft className="h-3.5 w-3.5" aria-hidden="true" /></button>
+                    <span className="text-[10px] tabular-nums text-slate-400" aria-live="polite">{currentSidebarPage} / {sidebarPageCount}</span>
+                    <button type="button" onClick={() => setSidebarPage((page) => Math.min(sidebarPageCount, page + 1))} disabled={currentSidebarPage >= sidebarPageCount} aria-label="Next repository page" className="rounded-md border border-slate-800 p-1 text-slate-400 hover:bg-slate-900 hover:text-white disabled:opacity-35 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"><ChevronRight className="h-3.5 w-3.5" aria-hidden="true" /></button>
                   </div>
-                ) : (
-                  <>
-                    <label htmlFor="app-repository-search" className="sr-only">Search GitHub App repositories on this page</label>
-                    <div className="relative mt-3">
-                      <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" aria-hidden="true" />
-                      <input
-                        id="app-repository-search"
-                        type="search"
-                        value={appRepoSearch}
-                        onChange={(event) => {
-                          setAppRepoSearch(event.target.value);
-                          setAppRepoPage(1);
-                        }}
-                        placeholder="Search App repositories…"
-                        className="w-full rounded-lg border border-slate-800 bg-slate-900/70 py-2 pl-8 pr-2.5 text-xs text-slate-200 placeholder:text-slate-600 focus:border-indigo-400/50 focus:outline-none focus:ring-2 focus:ring-indigo-400/20"
-                      />
-                    </div>
-                    {loadingAppRepos ? (
-                      <p className="mt-3 flex items-center gap-2 text-xs text-slate-500" role="status">
-                        <Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-400" aria-hidden="true" /> Loading installation repositories…
-                      </p>
-                    ) : appRepoError ? (
-                      <div className="mt-3 rounded-lg border border-red-400/20 bg-red-400/5 p-3" role="alert">
-                        <p className="text-xs leading-relaxed text-red-100">{appRepoError}</p>
-                        <button
-                          type="button"
-                          onClick={() => setAppRepoRetry((attempt) => attempt + 1)}
-                          className="mt-2 inline-flex items-center gap-1.5 text-xs font-medium text-indigo-300 hover:text-indigo-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
-                        >
-                          <RefreshCw className="h-3 w-3" aria-hidden="true" /> Retry repository list
-                        </button>
-                      </div>
-                    ) : appRepos.length === 0 ? (
-                      <div className="mt-3 rounded-lg border border-dashed border-slate-800 px-3 py-4 text-center" role="status">
-                        <p className="text-xs leading-relaxed text-slate-500">
-                          {appRepoPage > 1
-                            ? `No repositories were returned for page ${appRepoPage}.`
-                            : 'This installation has no repositories available. Check its repository access in GitHub or install it for a repository.'}
-                        </p>
-                        <div className="mt-2 flex justify-center gap-3">
-                          {appRepoPage > 1 && <button type="button" onClick={() => setAppRepoPage((page) => Math.max(1, page - 1))} className="text-xs font-medium text-indigo-300 hover:text-indigo-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400">Previous page</button>}
-                          {appRepoHasNextPage && <button type="button" onClick={() => setAppRepoPage((page) => page + 1)} className="text-xs font-medium text-indigo-300 hover:text-indigo-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400">Next page</button>}
-                        </div>
-                      </div>
-                    ) : (
-                      <>
-                        <ul className="mt-2 max-h-64 space-y-1 overflow-y-auto pr-1">
-                          {filteredAppRepos.map((repo) => (
-                            <li key={repo.id} className={`rounded-lg border p-2 ${selectedRepo?.id === repo.id ? 'border-violet-400/30 bg-violet-500/[0.07]' : 'border-slate-800/70 bg-slate-900/40'}`}>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setSelectedRepo(repo);
-                                  setConnectError('');
-                                  setAppConnectError('');
-                                  setReviews([]);
-                                  setReviewsError('');
-                                  setLoadingReviews(repo.connected);
-                                }}
-                                aria-pressed={selectedRepo?.id === repo.id}
-                                className="block w-full truncate rounded text-left text-xs font-medium text-slate-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
-                              >
-                                {repo.fullName}
-                              </button>
-                              <div className="mt-1 flex items-center justify-between gap-2 pl-0.5">
-                                <span className={repo.connected ? 'text-[10px] font-medium uppercase tracking-wide text-emerald-300' : 'text-[10px] text-slate-500'}>
-                                  {repo.connected
-                                    ? `Connected · ${repo.connectionType === 'github_app' ? 'GitHub App' : 'OAuth'}`
-                                    : repo.private ? 'Private' : 'Available'}
-                                </span>
-                                {!repo.connected && (
-                                  <button
-                                    type="button"
-                                    onClick={() => handleConnectAppRepository(repo)}
-                                    disabled={connectingAppRepoId === repo.id}
-                                    aria-label={`Connect ${repo.fullName} through GitHub App`}
-                                    className="rounded px-2 py-1 text-[10px] font-semibold text-violet-300 hover:bg-violet-400/10 disabled:cursor-wait disabled:opacity-60 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
-                                  >
-                                    {connectingAppRepoId === repo.id ? 'Connecting…' : 'Connect'}
-                                  </button>
-                                )}
-                              </div>
-                            </li>
-                          ))}
-                        </ul>
-                        {filteredAppRepos.length === 0 && (
-                          <p className="mt-2 rounded-lg border border-dashed border-slate-800 px-3 py-3 text-center text-[11px] text-slate-500" role="status">
-                            No repositories on this page match “{appRepoSearch.trim()}”.
-                          </p>
-                        )}
-                        <div className="mt-2 flex items-center justify-between border-t border-slate-800/80 pt-2">
-                          <span className="text-[10px] text-slate-500">App page {appRepoPage}</span>
-                          <div className="flex gap-1.5">
-                            <button type="button" onClick={() => setAppRepoPage((page) => Math.max(1, page - 1))} disabled={appRepoPage === 1 || loadingAppRepos} className="rounded-md border border-slate-700 px-2 py-1 text-[10px] text-slate-300 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400">Previous</button>
-                            <button type="button" onClick={() => setAppRepoPage((page) => page + 1)} disabled={!appRepoHasNextPage || loadingAppRepos} className="rounded-md border border-slate-700 px-2 py-1 text-[10px] text-slate-300 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400">Next</button>
-                          </div>
-                        </div>
-                      </>
-                    )}
-                    {appConnectError && <p className="mt-2 text-xs leading-relaxed text-red-200" role="alert">{appConnectError}</p>}
-                  </>
-                )}
-              </>
-            )}
-          </div>
-          <div className="flex items-center justify-between border-b border-slate-800/80 px-4 py-4">
-            <div className="flex items-center gap-2.5">
-              <FaGithub className="h-4 w-4 text-slate-400" aria-hidden="true" />
-              <div>
-                <h2 className="text-sm font-semibold text-slate-100">Repositories</h2>
-                <p className="mt-0.5 text-[11px] text-slate-500">From your GitHub account</p>
-              </div>
+                </div>
+              )}
+              <button type="button" onClick={() => { setRepositoryManagerOpen(true); setMobileSidebarOpen(false); }} title={sidebarCollapsed ? 'Manage repositories' : undefined} className={'mt-2 flex w-full items-center gap-2 rounded-lg border border-slate-800/80 bg-slate-900/60 px-2.5 py-2 text-left text-xs font-medium text-indigo-300 hover:border-indigo-400/30 hover:bg-indigo-500/[0.07] focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400' + (sidebarCollapsed ? ' lg:justify-center lg:px-1' : '')}><BookMarked className="h-3.5 w-3.5 shrink-0" aria-hidden="true" /><span className={sidebarCollapsed ? 'lg:hidden' : ''}>Manage repositories</span></button>
             </div>
-            {!loadingRepos && !repoError && (
-              <span className="rounded-md border border-slate-800 bg-slate-900 px-2 py-1 text-[11px] tabular-nums text-slate-400">
-                {repos.length}
-              </span>
-            )}
-          </div>
+          </aside>
 
-          <div className="p-3 sm:p-4">
-            {loadingRepos ? (
-              <div className="flex items-center gap-2 rounded-lg bg-slate-900/70 px-3 py-4 text-sm text-slate-400" role="status" aria-live="polite">
-                <Loader2 className="h-4 w-4 animate-spin text-indigo-400" aria-hidden="true" />
-                Loading repositories…
+          <div className="min-w-0">
+            <section id="repository-manager" aria-label="Repository management" hidden={!repositoryManagerOpen} className="rounded-2xl border border-slate-800/90 bg-slate-950/75 p-4 shadow-xl shadow-black/10 sm:p-5">
+              <div className="mb-5 flex flex-wrap items-start justify-between gap-4"><div><p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-indigo-300">Repository settings</p><h2 className="mt-1 text-lg font-semibold text-white">Manage repositories</h2><p className="mt-1 text-xs text-slate-500">Connect through GitHub App or your GitHub account. OAuth access does not install the App or configure webhook delivery.</p></div><button type="button" onClick={() => setRepositoryManagerOpen(false)} className="rounded-md border border-slate-800 px-3 py-1.5 text-xs text-slate-400 hover:bg-slate-900 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400">Back to reviews</button></div>
+
+              <div className="grid min-w-0 gap-4 xl:grid-cols-2">
+                <section className="min-w-0 rounded-xl border border-violet-400/15 bg-[#0b1120]/70 p-4" aria-labelledby="github-app-heading">
+                  <div className="flex items-start justify-between gap-3"><div><h3 id="github-app-heading" className="text-sm font-semibold text-slate-100">GitHub App</h3><p className="mt-1 text-[11px] leading-relaxed text-slate-500">Install the App and choose repositories for automatic PR review delivery.</p></div><FaGithub className="h-4 w-4 text-violet-300" aria-hidden="true" /></div>
+                  <button type="button" onClick={handleStartGitHubAppInstall} disabled={startingAppInstall} className="mt-3 inline-flex items-center justify-center gap-2 rounded-lg border border-violet-400/20 bg-violet-500/10 px-3 py-2 text-xs font-semibold text-violet-200 hover:border-violet-300/40 hover:bg-violet-500/15 disabled:cursor-wait disabled:opacity-60 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-300">{startingAppInstall ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : <ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" />}{startingAppInstall ? 'Opening GitHub…' : installations.length ? 'Install or manage GitHub App' : 'Install GitHub App'}</button>
+                  {loadingInstallations ? <p className="mt-3 flex items-center gap-2 text-xs text-slate-500" role="status"><Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-400" aria-hidden="true" /> Checking App installations…</p> : installationError ? <div className="mt-3 rounded-lg border border-red-400/20 bg-red-400/5 p-3" role="alert"><p className="text-xs leading-relaxed text-red-100">{installationError}</p><button type="button" onClick={() => setInstallationRetry((attempt) => attempt + 1)} className="mt-2 inline-flex items-center gap-1.5 text-xs font-medium text-indigo-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"><RefreshCw className="h-3 w-3" aria-hidden="true" /> Retry</button></div> : installations.length === 0 ? <p className="mt-3 text-[11px] leading-relaxed text-slate-500">No GitHub App installation is linked yet. Install the App, then return here to choose repositories.</p> : <>
+                    <label htmlFor="github-app-installation" className="mt-4 block text-[10px] font-semibold uppercase tracking-wider text-slate-500">Installation</label><select id="github-app-installation" value={selectedInstallationId} onChange={(event) => { setSelectedInstallationId(event.target.value); setAppRepoPage(1); setRepositorySearch(''); setAppConnectError(''); setAppRepos([]); setAppRepoHasNextPage(false); setAppRepoError(''); }} className="mt-1.5 w-full rounded-lg border border-slate-800 bg-slate-900 px-2.5 py-2 text-xs text-slate-200 focus:border-indigo-400/50 focus:outline-none focus:ring-2 focus:ring-indigo-400/20">{installations.map((installation) => <option key={installation.installationId} value={installation.installationId}>{installation.accountLogin} · {installation.status}</option>)}</select>
+                    {selectedInstallation?.status !== 'active' ? <p className="mt-3 rounded-lg border border-amber-400/15 bg-amber-400/5 p-3 text-xs leading-relaxed text-amber-100">This installation is {selectedInstallation?.status || 'unavailable'} and cannot provide repositories. Restore App access in GitHub.</p> : loadingAppRepos ? <p className="mt-3 flex items-center gap-2 text-xs text-slate-500" role="status"><Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-400" aria-hidden="true" /> Loading installation repositories…</p> : appRepoError ? <div className="mt-3 rounded-lg border border-red-400/20 bg-red-400/5 p-3" role="alert"><p className="text-xs leading-relaxed text-red-100">{appRepoError}</p><button type="button" onClick={() => setAppRepoRetry((attempt) => attempt + 1)} className="mt-2 inline-flex items-center gap-1.5 text-xs font-medium text-indigo-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"><RefreshCw className="h-3 w-3" aria-hidden="true" /> Retry App repositories</button></div> : appRepos.length === 0 && <p className="mt-3 text-[11px] text-slate-500" role="status">No repositories are available from this installation on the current page.</p>}
+                  </>}
+                </section>
+
+                <section className="min-w-0 rounded-xl border border-slate-800/80 bg-[#0b1120]/70 p-4" aria-labelledby="oauth-repositories-heading"><div className="flex items-center justify-between gap-3"><div><h3 id="oauth-repositories-heading" className="text-sm font-semibold text-slate-100">GitHub account</h3><p className="mt-1 text-[11px] text-slate-500">Repositories available to your linked GitHub account.</p></div><FaGithub className="h-4 w-4 text-slate-400" aria-hidden="true" /></div>
+                  {repoError && <div className="mt-3 rounded-lg border border-red-400/20 bg-red-400/5 p-3" role="alert"><p className="text-xs leading-relaxed text-red-100">{repoError}</p>{repoReauthRequired && <a href={apiUrl('/api/auth/github')} className="mt-2 inline-flex text-xs font-semibold text-indigo-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400">Reconnect GitHub</a>}<button type="button" onClick={() => setRepoRetry((attempt) => attempt + 1)} className="ml-3 mt-2 inline-flex items-center gap-1.5 text-xs font-medium text-indigo-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"><RefreshCw className="h-3 w-3" aria-hidden="true" /> Retry</button></div>}
+                  {loadingRepos && <p className="mt-3 flex items-center gap-2 text-xs text-slate-500" role="status"><Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-400" aria-hidden="true" /> Loading GitHub account repositories…</p>}
+                  {!loadingRepos && !repoError && repos.length === 0 && <p className="mt-3 text-xs text-slate-500" role="status">No repositories were returned on this page.</p>}
+                </section>
               </div>
-            ) : repoError ? (
-              <div className="rounded-xl border border-red-400/20 bg-red-400/5 p-4" role="alert">
-                <div className="flex items-start gap-2.5">
-                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-300" aria-hidden="true" />
-                  <div>
-                    <p className="text-sm font-medium text-red-200">Repositories unavailable</p>
-                    <p className="mt-1 text-xs leading-relaxed text-slate-400">{repoError}</p>
-                    {repoReauthRequired && (
-                      <a
-                        href={apiUrl('/api/auth/github')}
-                        className="mt-3 inline-flex rounded text-xs font-semibold text-indigo-300 hover:text-indigo-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
-                      >
-                        Reconnect GitHub
-                      </a>
-                    )}
+
+              <div className="mt-4 rounded-xl border border-slate-800/80 bg-[#0b1120]/60 p-4">
+                <div className="flex flex-wrap items-end justify-between gap-3"><div><h3 className="text-sm font-semibold text-slate-100">Available repositories</h3><p className="mt-1 text-[11px] text-slate-500">Searches owned repositories loaded so far.</p></div><label htmlFor="manage-repository-search" className="sr-only">Search owned repositories</label><div className="relative w-full sm:max-w-xs"><Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" aria-hidden="true" /><input id="manage-repository-search" type="search" value={repositorySearch} onChange={(event) => { setRepositorySearch(event.target.value); setSidebarPage(1); setManageRepositoriesPage(1); }} placeholder="Search repositories…" className="w-full rounded-lg border border-slate-800 bg-slate-900/70 py-2 pl-8 pr-2 text-xs text-slate-200 placeholder:text-slate-600 focus:border-indigo-400/50 focus:outline-none focus:ring-2 focus:ring-indigo-400/20" /></div></div>
+                {loadingRepos && loadingAppRepos && mergedRepositories.length === 0 ? <p className="mt-4 flex items-center gap-2 text-xs text-slate-500" role="status"><Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-400" aria-hidden="true" /> Loading available repositories…</p> : filteredRepositories.length === 0 ? <p className="mt-4 rounded-lg border border-dashed border-slate-800 px-4 py-6 text-center text-xs text-slate-500" role="status">{repositorySearch.trim() ? 'No loaded repositories match this search.' : 'No repositories are available yet.'}</p> : <ul className="mt-3 divide-y divide-slate-800/70">
+                  {managedRepositories.map((repository) => { const connectedViaApp = repository.connected && repository.connectionType === 'github_app'; const busy = connectingAppRepoId === repository.id; return <li key={repository.fullName.toLocaleLowerCase()} className="flex min-w-0 flex-wrap items-center gap-2 py-2.5 sm:flex-nowrap">
+                    <button type="button" onClick={() => selectRepository(repository)} aria-pressed={selectedRepo?.fullName?.toLocaleLowerCase() === repository.fullName.toLocaleLowerCase()} className="min-w-0 flex-1 rounded text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"><span className="block truncate text-xs font-medium text-slate-200">{repository.name}</span><span className="mt-0.5 block text-[10px] text-slate-500">{connectedViaApp ? 'GitHub App connection active' : repository.connected ? (repository.private ? 'Private' : 'Public') + ' · OAuth linked; App connection required' : (repository.private ? 'Private' : 'Public')}</span></button>
+                    {connectedViaApp ? <span className="shrink-0 rounded-full border border-emerald-400/15 bg-emerald-400/5 px-2 py-1 text-[10px] font-medium text-emerald-300">Connected</span> : <button type="button" onClick={() => handleConnectAppRepository(repository.appRepository || repository.oauthRepository || repository)} disabled={busy} className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-violet-500/90 px-2.5 py-1.5 text-[10px] font-semibold text-white hover:bg-violet-400 disabled:cursor-wait disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-300">{busy && <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />}{busy ? 'Connecting…' : 'Connect'}</button>}
+                  </li>; })}
+                </ul>}
+                {appConnectError && <p className="mt-2 text-xs text-red-200" role="alert">{appConnectError}</p>}
+                {filteredRepositories.length > SIDEBAR_REPOSITORIES_PER_PAGE || moreRepositorySourcesAvailable ? (
+                  <div className="mt-3 flex items-center justify-center gap-3 border-t border-slate-800/80 pt-3">
                     <button
                       type="button"
-                      onClick={() => setRepoRetry((attempt) => attempt + 1)}
-                      className="mt-3 inline-flex items-center gap-1.5 text-xs font-medium text-indigo-300 hover:text-indigo-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
-                    >
-                      <RefreshCw className="h-3 w-3" aria-hidden="true" /> Try again
-                    </button>
+                      onClick={() => setManageRepositoriesPage(Math.max(1, currentManageRepositoriesPage - 1))}
+                      disabled={currentManageRepositoriesPage === 1 || loadingRepos || loadingAppRepos}
+                      className="rounded-md border border-slate-800 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-40 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
+                    >Previous</button>
+                    <span className="min-w-12 text-center text-xs tabular-nums text-slate-400" aria-live="polite">{currentManageRepositoriesPage} / {manageRepositoriesPageCount}</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (currentManageRepositoriesPage < manageRepositoriesPageCount) {
+                          setManageRepositoriesPage(currentManageRepositoriesPage + 1);
+                          return;
+                        }
+                        setManageRepositoriesPage(currentManageRepositoriesPage + 1);
+                        if (repoHasNextPage) setRepoPage((page) => page + 1);
+                        if (appRepositoriesHaveNextPage) setAppRepoPage((page) => page + 1);
+                      }}
+                      disabled={!canAdvanceManageRepositories || loadingRepos || loadingAppRepos}
+                      className="rounded-md border border-slate-800 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-40 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
+                    >Next</button>
                   </div>
-                </div>
+                ) : null}
               </div>
-            ) : repos.length === 0 ? (
-              <div className="rounded-xl border border-dashed border-slate-800 px-4 py-7 text-center">
-                <BookMarked className="mx-auto h-5 w-5 text-slate-600" aria-hidden="true" />
-                <p className="mt-2 text-sm font-medium text-slate-300">No repositories on this page</p>
-                <p className="mt-1 text-xs leading-relaxed text-slate-500">This GitHub account did not return repositories for page {repoPage}.</p>
-                {repoPage > 1 && (
-                  <button
-                    type="button"
-                    onClick={() => setRepoPage((page) => Math.max(1, page - 1))}
-                    className="mt-3 rounded px-2 py-1 text-xs font-medium text-indigo-300 hover:text-indigo-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
-                  >
-                    Previous page
-                  </button>
-                )}
-                {repoHasNextPage && (
-                  <button
-                    type="button"
-                    onClick={() => setRepoPage((page) => page + 1)}
-                    className="mt-3 ml-2 rounded px-2 py-1 text-xs font-medium text-indigo-300 hover:text-indigo-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
-                  >
-                    Next page
-                  </button>
-                )}
-              </div>
-            ) : (
-              <>
-                <label htmlFor="repository-search" className="sr-only">Search repositories on this page</label>
-                <div className="relative mb-3">
-                  <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" aria-hidden="true" />
-                  <input
-                    id="repository-search"
-                    type="search"
-                    value={repoSearch}
-                    onChange={(event) => {
-                      setRepoSearch(event.target.value);
-                      setRepoPage(1);
-                    }}
-                    placeholder="Search this page…"
-                    className="w-full rounded-lg border border-slate-800 bg-slate-900/70 py-2 pl-9 pr-3 text-sm text-slate-200 placeholder:text-slate-600 focus:border-indigo-400/50 focus:outline-none focus:ring-2 focus:ring-indigo-400/20"
-                  />
-                  <p className="mt-1 px-1 text-[10px] text-slate-500">Searches the current GitHub results page. Use pagination to browse more.</p>
-                </div>
-                <div className="mb-2 flex items-center justify-between px-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-600">
-                  <span>Repository list</span>
-                  <span>{repos.filter((repo) => repo.connected).length} connected on this page</span>
-                </div>
-                <ul className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-2 lg:mx-0 lg:max-h-[calc(100vh-250px)] lg:flex-col lg:overflow-y-auto lg:overflow-x-hidden lg:px-0 lg:pb-0">
-                  {filteredRepos.map((repo) => (
-                    <li key={repo.id} className="w-[245px] shrink-0 lg:w-full">
-                      <div className={`group rounded-xl border p-2 transition ${selectedRepo?.id === repo.id ? 'border-indigo-400/30 bg-indigo-500/[0.08]' : 'border-transparent bg-slate-900/50 hover:border-slate-800 hover:bg-slate-900'}`}>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setSelectedRepo(repo);
-                            setConnectError('');
-                            setReviews([]);
-                            setReviewsError('');
-                            setLoadingReviews(repo.connected);
-                          }}
-                          aria-pressed={selectedRepo?.id === repo.id}
-                          className="flex w-full items-start gap-2.5 rounded-lg p-1.5 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
-                        >
-                          <span className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${repo.connected ? 'bg-emerald-400/10 text-emerald-300' : 'bg-slate-800 text-slate-400'}`}>
-                            {repo.private ? <LockKeyhole className="h-4 w-4" aria-hidden="true" /> : <BookMarked className="h-4 w-4" aria-hidden="true" />}
-                          </span>
-                          <span className="min-w-0 flex-1">
-                            <span className="block truncate text-sm font-medium text-slate-200">{repo.name}</span>
-                            <span className="mt-0.5 block truncate text-[11px] text-slate-500">{repo.fullName}</span>
-                          </span>
-                          <ArrowRight className={`mt-2 h-3.5 w-3.5 shrink-0 transition ${selectedRepo?.id === repo.id ? 'translate-x-0 text-indigo-300 opacity-100' : '-translate-x-1 text-slate-600 opacity-0 group-hover:opacity-100'}`} aria-hidden="true" />
-                        </button>
-                        <div className="flex items-center justify-between pl-[46px] pr-1">
-                          {repo.connected ? (
-                            <span className="inline-flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-emerald-300">
-                              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden="true" />
-                              Linked · {repo.connectionType === 'github_app' ? 'GitHub App' : 'OAuth'}
-                            </span>
-                          ) : (
-                            <span className="text-[10px] font-medium uppercase tracking-wider text-slate-500">Not linked</span>
-                          )}
-                          {!repo.connected && (
-                            <button
-                              type="button"
-                              onClick={() => handleConnectRepository(repo)}
-                              disabled={connectingRepoId === repo.id}
-                              aria-label={`Connect ${repo.fullName}`}
-                              className="rounded-md px-2 py-1 text-[11px] font-semibold text-indigo-300 transition hover:bg-indigo-400/10 hover:text-indigo-200 disabled:cursor-wait disabled:opacity-60 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
-                            >
-                              {connectingRepoId === repo.id ? 'Connecting…' : 'Connect'}
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-                {filteredRepos.length === 0 && (
-                  <p className="rounded-lg border border-dashed border-slate-800 px-3 py-4 text-center text-xs text-slate-400" role="status">
-                    No repositories on this page match “{repoSearch.trim()}”.
-                  </p>
-                )}
-                <div className="mt-3 flex items-center justify-between border-t border-slate-800/80 pt-3">
-                  <span className="text-[11px] text-slate-500">Page {repoPage}</span>
-                  <div className="flex gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setRepoPage((page) => Math.max(1, page - 1))}
-                      disabled={repoPage === 1 || loadingRepos}
-                      className="rounded-md border border-slate-700 px-2.5 py-1.5 text-xs text-slate-300 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
-                    >
-                      Previous
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setRepoPage((page) => page + 1)}
-                      disabled={!repoHasNextPage || loadingRepos}
-                      className="rounded-md border border-slate-700 px-2.5 py-1.5 text-xs text-slate-300 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
-                    >
-                      Next
-                    </button>
-                  </div>
-                </div>
-              </>
-            )}
-          </div>
-
-          <div className="border-t border-slate-800/80 px-4 py-3">
-            <p className="text-[11px] leading-relaxed text-slate-500">
-              Connecting associates a repository with your account. It does not install a GitHub webhook.
-            </p>
-          </div>
-        </aside>
-
-        <section className="min-w-0 space-y-5" aria-label="Repository review history">
+            </section>
+            <section className="min-w-0 space-y-5" aria-label="Repository review history" hidden={repositoryManagerOpen}>
           <div className="rounded-2xl border border-slate-800/90 bg-slate-950/70 p-5 shadow-xl shadow-black/10 sm:p-6">
             <div className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
               <div className="min-w-0">
@@ -967,11 +777,13 @@ export default function Dashboard() {
                   {selectedRepo ? selectedRepo.fullName : 'Pull request reviews'}
                 </h1>
                 <p className="mt-1.5 max-w-2xl text-sm leading-relaxed text-slate-400">
-                  {selectedRepo
-                    ? selectedRepo.connected
-                      ? `Review history and findings for this repository connected through ${selectedRepoUsesApp ? 'the GitHub App' : 'GitHub OAuth'}.`
-                      : `Connect this repository through ${selectedRepoUsesApp ? 'the GitHub App' : 'GitHub OAuth'} to make its review history available here.`
-                    : 'Choose a repository to inspect its automated review history.'}
+                  {selectedRepoAppConnected
+                    ? 'Review history and findings for this repository connected through the GitHub App.'
+                    : selectedRepo?.connectionType === 'oauth'
+                      ? 'OAuth is linked, but this repository needs a GitHub App connection for automatic reviews here.'
+                      : selectedRepo
+                        ? 'Connect this repository through the GitHub App to enable automatic reviews here.'
+                        : 'Choose a repository to inspect its automated review history.'}
                 </p>
               </div>
               {selectedRepo && (
@@ -988,7 +800,9 @@ export default function Dashboard() {
                   {selectedRepo.connected && (
                     <span className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium ${reviews.length > 0 ? 'border-sky-400/20 bg-sky-400/5 text-sky-200' : 'border-amber-400/20 bg-amber-400/5 text-amber-200'}`}>
                       <CircleDot className="h-3.5 w-3.5" aria-hidden="true" />
-                      {reviews.length > 0 ? 'PR event received' : selectedRepoUsesApp ? 'Awaiting first review' : 'Webhook not verified'}
+                      {selectedRepoAppConnected
+                        ? reviews.length > 0 ? 'Review history found' : 'No review recorded'
+                        : 'App connection needed'}
                     </span>
                   )}
                   {selectedRepo.url && (
@@ -1007,14 +821,7 @@ export default function Dashboard() {
             </div>
           </div>
 
-          {connectError && (
-            <div className="flex items-start gap-2.5 rounded-xl border border-red-400/20 bg-red-400/5 px-4 py-3 text-sm text-red-200" role="alert">
-              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-300" aria-hidden="true" />
-              <span>{connectError}</span>
-            </div>
-          )}
-
-          {selectedRepo?.connected && (
+          {selectedRepoAppConnected && (
             <div className="rounded-xl border border-slate-800 bg-slate-950/60 px-4 py-3">
               <p className="text-xs font-semibold text-slate-200">
                 Connected through {selectedRepoUsesApp ? 'GitHub App' : 'GitHub OAuth'}
@@ -1022,7 +829,7 @@ export default function Dashboard() {
               <p className="mt-1 text-xs leading-relaxed text-slate-500">
                 {selectedRepoUsesApp
                   ? 'This connection uses the GitHub App route for pull request events. CodeGuard confirms delivery only when a review appears in the history below.'
-                  : 'This legacy OAuth connection does not configure App webhooks. It needs a repository webhook pointing to CodeGuard before pull request reviews can arrive.'}
+                  : 'OAuth access links this repository to CodeGuard but does not configure automatic GitHub App delivery. Use Manage repositories to connect it through the GitHub App.'}
               </p>
             </div>
           )}
@@ -1035,33 +842,27 @@ export default function Dashboard() {
               <h2 className="mt-5 text-base font-semibold text-slate-200">Select a repository</h2>
               <p className="mt-2 max-w-sm text-sm leading-relaxed text-slate-500">Choose one from the repository list to see its review activity and findings.</p>
             </div>
-          ) : !selectedRepo.connected ? (
+          ) : !selectedRepoAppConnected ? (
             <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-6 sm:p-8">
               <div className="mx-auto flex max-w-lg flex-col items-center text-center">
                 <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-indigo-400/20 bg-indigo-500/10">
                   <BookMarked className="h-5 w-5 text-indigo-300" aria-hidden="true" />
                 </div>
-                <h2 className="mt-4 text-lg font-semibold text-white">Connect {selectedRepo.name}</h2>
+                <h2 className="mt-4 text-lg font-semibold text-white">Connect {selectedRepo.name} through GitHub App</h2>
                 <p className="mt-2 text-sm leading-relaxed text-slate-400">
-                  {selectedRepoUsesApp
-                    ? 'CodeGuard will verify that the selected GitHub App installation can access this repository, then link it to your CodeGuard account.'
-                    : 'CodeGuard will verify access through your connected GitHub account and associate this repository with your CodeGuard account.'}
+                  {selectedRepo.connected
+                    ? 'This repository is linked through GitHub OAuth, but OAuth access does not connect it to the GitHub App or enable App-based automatic PR reviews. Connect it through the App to receive reviews here.'
+                    : 'Connect this repository through your GitHub App installation to enable automatic pull request reviews. GitHub account access alone does not configure App delivery.'}
                 </p>
                 <button
                   type="button"
-                  onClick={() => selectedRepoUsesApp
-                    ? handleConnectAppRepository(selectedRepo)
-                    : handleConnectRepository(selectedRepo)}
-                  disabled={(selectedRepoUsesApp ? connectingAppRepoId : connectingRepoId) === selectedRepo.id}
+                  onClick={() => setRepositoryManagerOpen(true)}
                   className="mt-5 inline-flex items-center gap-2 rounded-lg bg-indigo-500 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-indigo-950/30 transition hover:bg-indigo-400 disabled:cursor-wait disabled:opacity-60 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950"
                 >
-                  {(selectedRepoUsesApp ? connectingAppRepoId : connectingRepoId) === selectedRepo.id ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <ShieldCheck className="h-4 w-4" aria-hidden="true" />}
-                  {(selectedRepoUsesApp ? connectingAppRepoId : connectingRepoId) === selectedRepo.id ? 'Verifying access…' : 'Connect repository'}
+                  <ShieldCheck className="h-4 w-4" aria-hidden="true" /> Connect repository
                 </button>
                 <p className="mt-4 max-w-md text-xs leading-relaxed text-slate-500">
-                  {selectedRepoUsesApp
-                    ? 'Supported pull request events can reach CodeGuard through the App webhook. Review arrival is confirmed when a review appears in this dashboard.'
-                    : 'This does not install a GitHub webhook. Review events appear only when a webhook is already configured for this repository.'}
+                  Manage repositories opens the existing GitHub App installation and repository connection flow.
                 </p>
               </div>
             </div>
@@ -1142,14 +943,10 @@ export default function Dashboard() {
                   </div>
                   <h3 className="mt-4 text-sm font-semibold text-slate-200">No reviews in history</h3>
                   <p className="mx-auto mt-1.5 max-w-lg text-xs leading-relaxed text-slate-400">
-                    {selectedRepoUsesApp
-                      ? 'This repository is connected through the GitHub App. Open a pull request or push a commit to an open pull request to request the first review. CodeGuard will show it here after the App webhook event reaches the review pipeline.'
-                      : <>This repository is linked through GitHub OAuth, but webhook delivery has not been verified. To trigger a review, add a webhook in GitHub repository Settings → Webhooks pointing to your deployed CodeGuard URL plus <code className="rounded bg-slate-900 px-1 py-0.5 font-mono text-slate-300">/api/webhooks/github</code>, configure the matching <code className="rounded bg-slate-900 px-1 py-0.5 font-mono text-slate-300">WEBHOOK_SECRET</code>, and subscribe to Pull requests. Then open a pull request or push a commit to an open pull request.</>}
+                    This repository is connected through the GitHub App. A review appears here after a supported pull request event reaches CodeGuard’s App webhook pipeline. Open a pull request or update an open one to generate review activity; this empty history does not confirm delivery.
                   </p>
                   <p className="mx-auto mt-2 max-w-lg text-[11px] leading-relaxed text-slate-500">
-                    {selectedRepoUsesApp
-                      ? 'Installation alone does not prove that an event was delivered; this state changes when a review is recorded.'
-                      : 'CodeGuard cannot confirm whether the webhook is installed. Linking a repository does not configure one.'}
+                    Installation alone does not prove that an event was delivered; this state changes when a review is recorded.
                   </p>
                 </div>
               ) : (
@@ -1279,7 +1076,9 @@ export default function Dashboard() {
               )}
             </>
           )}
-        </section>
+            </section>
+          </div>
+        </div>
       </main>
     </div>
   );

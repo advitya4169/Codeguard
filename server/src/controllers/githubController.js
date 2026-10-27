@@ -92,6 +92,7 @@ export const getUserRepositories = async (req, res) => {
     ]));
     const formattedRepos = repos.map((repo) => ({
       ...formatRepository(repo),
+      ownedByAuthenticatedUser: String(repo.owner?.id) === String(user.githubId),
       connected: connectionTypes.has(repo.id),
       connectionType: connectionTypes.get(repo.id) || null,
     }));
