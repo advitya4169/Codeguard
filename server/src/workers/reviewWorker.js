@@ -5,11 +5,14 @@ import dotenv from "dotenv";
 
 import { redisConnection } from "../config/queue.js";
 import { getPRDiff, postPRComment } from '../services/githubService.js';
+import { getInstallationAccessToken } from '../services/githubAppService.js';
 import { cleanDiff } from "../analyzers/staticAnalyzer.js";
+import { validateFindingsAgainstDiff } from "../analyzers/diffFindingValidator.js";
 
 import ReviewJob from "../models/ReviewJob.js";
 import Finding from "../models/Finding.js";
 import Repository from "../models/Repository.js";
+import Installation from "../models/Installation.js";
 
 dotenv.config({ quiet: true });
 
@@ -51,9 +54,9 @@ Identify genuine:
 - Code quality problems
 - Maintainability issues
 
-Do not invent findings. Report only problems supported by the diff.
-Use paths from the diff and line numbers when identifiable.
-Use lineNumber 0 when the line cannot be determined.
+Base every finding on specific code shown in the supplied diff. Start each explanation with Evidence: followed by an exact short code excerpt enclosed in backticks, then a dash and how that code causes the issue. Do not infer behavior in files or code the diff does not show, or report claims contradicted by the diff.
+Use an exact file path and the new-side line containing the cited code. Prefer the actual vulnerable statement over nearby braces, imports, or declarations. If no reliable location is visible, omit the finding.
+Do not claim syntax errors, undefined variables, incomplete implementations, or filename conflicts without direct evidence. Check that a claimed undefined name is not declared in the shown code. Test and fixture files remain valid review targets; describe risks in their test/example context and do not imply production impact without evidence.
 If no genuine issues exist, return an empty findings array.
 
 Return exactly one JSON object in this format:
@@ -64,7 +67,7 @@ Return exactly one JSON object in this format:
       "severity": "high",
       "filePath": "src/example.js",
       "lineNumber": 10,
-      "explanation": "Explain the issue",
+      "explanation": "Evidence: [exact code excerpt in backticks] — explain how it causes the issue",
       "suggestedFix": "Explain how to fix it"
     }
   ]
@@ -85,7 +88,7 @@ ${diff}
       {
         role: "system",
         content:
-          "You are an expert code reviewer. Return one valid JSON object with a findings array. Each finding must include category, severity, filePath, lineNumber, explanation, and suggestedFix. Never invent issues. Return only JSON.",
+          "You are an expert code reviewer. Review only evidence present in the supplied diff. Return one valid JSON object with a findings array. Each finding must include category, severity, exact diff filePath, positive new-side diff lineNumber, explanation, and suggestedFix. Start explanation with Evidence: `exact short code excerpt from the cited line` — then explain how that code causes the issue. Do not invent or speculate; reject claims contradicted by the diff. Do not claim syntax errors, undefined variables, incomplete implementations, or filename conflicts without direct evidence. Assess test/fixture code in its actual context and do not imply production impact without evidence. Omit findings without a reliable location. Return only JSON.",
       },
       {
         role: "user",
@@ -160,58 +163,185 @@ ${diff}
   return result.findings;
 }
 
-const worker = new Worker(
-  "code-review-queue",
-  async (job) => {
-    const {
+export const createReviewProcessor = ({
+  ReviewJobModel = ReviewJob,
+  FindingModel = Finding,
+  RepositoryModel = Repository,
+  InstallationModel = Installation,
+  getPRDiffFn = getPRDiff,
+  postPRCommentFn = postPRComment,
+  getInstallationAccessTokenFn = getInstallationAccessToken,
+  analyzeDiffFn = analyzeDiff,
+  logger = console,
+} = {}) => async (job) => {
+  const data = job?.data;
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error("Review job metadata is invalid.");
+  }
+
+  const {
       prNumber,
-      repoFullName,
+      repoFullName: queuedRepoFullName,
       commitSha,
       accessToken,
       userId,
       githubRepoId,
-    } = job.data;
+      installationId,
+  } = data;
+  const hasInstallationMetadata = Object.prototype.hasOwnProperty.call(data, "installationId");
 
-    console.log(
-      `\nWORKER STARTING: PR #${prNumber} for ${repoFullName}`
-    );
+  if (
+      !Number.isSafeInteger(prNumber) || prNumber <= 0 ||
+      !Number.isSafeInteger(githubRepoId) || githubRepoId <= 0 ||
+      typeof commitSha !== "string" || !commitSha.trim() ||
+      typeof userId !== "string" || !/^[a-f\d]{24}$/i.test(userId)
+  ) {
+    throw new Error("Review job metadata is invalid.");
+  }
 
-    let reviewJob;
+  logger.log(
+      `\nWORKER STARTING: PR #${prNumber} for ${queuedRepoFullName || "connected repository"}`
+  );
 
-    try {
-      // 1. Find or create the repository record.
-      const [owner, name] = repoFullName.split("/");
+  let reviewJob;
+  let repo;
+  let authToken;
+  let needsInstallationToken = false;
 
-      let repo = await Repository.findOne({ githubRepoId });
+  try {
+      if (hasInstallationMetadata) {
+        if (
+          typeof installationId !== "string" ||
+          !/^[1-9]\d{0,19}$/.test(installationId) ||
+          Object.prototype.hasOwnProperty.call(data, "accessToken")
+        ) {
+          throw new Error("GitHub App review job metadata is invalid.");
+        }
 
-      if (!repo) {
-        repo = await Repository.create({
-          githubRepoId,
-          owner,
-          name,
-          fullName: repoFullName,
+        const installation = await InstallationModel.findOne({
+          installationId,
           userId,
+          status: "active",
         });
+        if (!installation) {
+          throw new Error(
+            "GitHub App installation is unavailable or inactive. Reauthorize the installation and retry the review."
+          );
+        }
+
+        repo = await RepositoryModel.findOne({
+          githubRepoId,
+          userId,
+          installationId,
+          isConnected: true,
+          isHookActive: true,
+        });
+        if (!repo) {
+          throw new Error(
+            "Repository is no longer connected to this GitHub App installation. Reconnect it and retry the review."
+          );
+        }
+
+        needsInstallationToken = true;
+      } else {
+        if (typeof accessToken !== "string" || !accessToken) {
+          throw new Error("Legacy OAuth review job is missing its GitHub access token.");
+        }
+
+        // A legacy job must remain OAuth-backed; it cannot fall through to an App repository.
+        repo = await RepositoryModel.findOne({
+          githubRepoId,
+          userId,
+          isConnected: true,
+          installationId: { $in: [null, ""] },
+        });
+        authToken = accessToken;
       }
 
-      // 2. Create a record to track this review.
-      reviewJob = await ReviewJob.create({
+      // Webhooks may only process repositories explicitly connected by a user.
+      // Never claim or create repository ownership from a PR event.
+      if (!repo) {
+        throw new Error("Repository is no longer connected to this CodeGuard user");
+      }
+      const repoFullName = repo.fullName;
+      if (typeof repoFullName !== "string" || !repoFullName) {
+        throw new Error("Connected repository metadata is invalid.");
+      }
+
+      // Reuse one persisted review record for every attempt on this PR head.
+      const reviewIdentity = {
         repositoryId: repo._id,
         prNumber,
         commitSha,
-        status: "processing",
-      });
+      };
+      const reviewUpdate = {
+        $set: {
+          status: "processing",
+          summary: "Review is processing.",
+        },
+      };
+
+      try {
+        reviewJob = await ReviewJobModel.findOneAndUpdate(
+          reviewIdentity,
+          reviewUpdate,
+          { new: true, upsert: true, setDefaultsOnInsert: true }
+        );
+      } catch (error) {
+        // A concurrent upsert can win the unique-index race; reuse its row.
+        if (error?.code !== 11000) throw error;
+        reviewJob = await ReviewJobModel.findOneAndUpdate(
+          reviewIdentity,
+          reviewUpdate,
+          { new: true }
+        );
+        if (!reviewJob) throw error;
+      }
+
+      if (needsInstallationToken) {
+        let tokenResult;
+        try {
+          tokenResult = await getInstallationAccessTokenFn(installationId);
+        } catch (error) {
+          if ([401, 403, 404].includes(error?.status)) {
+            throw new Error(
+              "GitHub App installation access is unavailable. Restore the installation and repository access, then retry the review."
+            );
+          }
+          throw new Error(
+            "Could not obtain GitHub App installation access. Check the installation and App configuration, then retry the review."
+          );
+        }
+        if (
+          !tokenResult || typeof tokenResult.token !== "string" || !tokenResult.token ||
+          !Number.isFinite(Date.parse(tokenResult.expiresAt)) ||
+          Date.parse(tokenResult.expiresAt) <= Date.now()
+        ) {
+          throw new Error("GitHub App returned an invalid or expired installation token.");
+        }
+        authToken = tokenResult.token;
+      }
 
       await job.updateProgress(10);
 
       // 3. Fetch the PR diff from GitHub.
       console.log("- Fetching PR diff...");
 
-      const rawDiff = await getPRDiff(
-        repoFullName,
-        prNumber,
-        accessToken
-      );
+      let rawDiff;
+      try {
+        rawDiff = await getPRDiffFn(
+          repoFullName,
+          prNumber,
+          authToken
+        );
+      } catch (error) {
+        if (hasInstallationMetadata && [401, 403, 404].includes(error?.status)) {
+          throw new Error(
+            "GitHub App can no longer access this pull request. Restore repository access in the installation, then retry the review."
+          );
+        }
+        throw error;
+      }
 
       // 4. Remove excluded files.
       const cleanCodeDiff = cleanDiff(rawDiff);
@@ -234,7 +364,8 @@ const worker = new Worker(
       // 5. Analyze the diff using Groq.
       console.log("- Requesting Groq AI analysis...");
 
-      const findings = await analyzeDiff(cleanCodeDiff);
+      const aiFindings = await analyzeDiffFn(cleanCodeDiff);
+      const findings = validateFindingsAgainstDiff(aiFindings, cleanCodeDiff);
 
       await job.updateProgress(80);
 
@@ -249,9 +380,12 @@ const worker = new Worker(
         suggestedFix: finding.suggestedFix,
       }));
 
+      // Replace the prior attempt's findings, including when the new result is empty.
+      await FindingModel.deleteMany({ reviewJobId: reviewJob._id });
+
       // 7. Save findings, if any were returned.
       if (findingDocs.length > 0) {
-      await Finding.insertMany(findingDocs); // Your existing working code
+      await FindingModel.insertMany(findingDocs); // Your existing working code
       
       // --- NEW: STAGE 7 GITHUB POSTING ---
       await job.updateProgress(90);
@@ -273,8 +407,22 @@ const worker = new Worker(
       
       markdownReport += `\n*Processed by CodeGuard (Model: openai/gpt-oss-20b)*`;
       
-      await postPRComment(repoFullName, prNumber, accessToken, markdownReport);
-      console.log('✅ Posted review comment to GitHub PR!');
+      try {
+        await postPRCommentFn(repoFullName, prNumber, authToken, markdownReport);
+        logger.log('✅ Posted review comment to GitHub PR!');
+      } catch (error) {
+        // Comment delivery is optional; the analyzed findings are already persisted.
+        logger.error(
+          `GitHub PR comment failed for ${repoFullName}#${prNumber}; review results remain saved.`,
+          {
+            status: Number.isInteger(error?.status) ? error.status : undefined,
+            errorType: error?.name || 'Error',
+            endpoint: error?.endpoint,
+            responseMessage: error?.responseMessage,
+            acceptedPermissions: error?.acceptedPermissions,
+          }
+        );
+      }
       // -----------------------------------
     }
 
@@ -285,7 +433,7 @@ const worker = new Worker(
       await reviewJob.save();
       await job.updateProgress(100);
 
-      console.log(
+      logger.log(
         `COMPLETE: Saved ${findings.length} findings to MongoDB.`
       );
 
@@ -303,7 +451,11 @@ const worker = new Worker(
 
       throw error;
     }
-  },
+  };
+
+const worker = new Worker(
+  "code-review-queue",
+  createReviewProcessor(),
   {
     connection: redisConnection,
     concurrency: 5,

@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import { useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Loader2 } from 'lucide-react';
 
@@ -12,7 +12,8 @@ export default function LoginSuccess() {
     if (token) {
       // Save the JWT in localStorage for future authenticated requests
       localStorage.setItem('codeguard_token', token);
-      navigate('/');
+      // Dashboard is now at /dashboard (root / is the public landing page)
+      navigate('/dashboard');
     } else {
       navigate('/login?error=no_token');
     }
