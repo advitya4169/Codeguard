@@ -1,25 +1,25 @@
 # CodeGuard
 
-CodeGuard reviews GitHub pull request diffs with Groq-powered AI analysis. It processes reviews in the background, saves review history and findings, and can post a summary comment to the pull request.
+CodeGuard reviews GitHub pull request diffs with Groq-powered AI analysis. Reviews run as background jobs, are saved with their findings in MongoDB, and can be summarized in a GitHub pull request comment.
 
 ## Features
 
 - GitHub OAuth sign-in for CodeGuard accounts.
-- GitHub App installation and repository management for automatic pull request delivery.
-- Background review jobs with BullMQ and Redis.
-- AI findings with severity, evidence, file locations, and suggested fixes.
-- Dashboard review history for connected repositories.
-- Optional GitHub pull request comments after findings are saved.
+- GitHub App installation and repository connection for automatic PR event delivery.
+- BullMQ background processing backed by Redis.
+- Diff-aware finding validation for paths, evidence excerpts, and line locations.
+- Dashboard repository management, review history, findings, and suggested fixes.
+- Optional GitHub PR comments after review results are persisted.
 
-GitHub OAuth sign-in and GitHub App installation are separate connections. OAuth lets a user sign in and browse their GitHub repositories; OAuth access by itself does not configure automatic App webhook delivery. To receive automatic reviews, install the CodeGuard GitHub App and connect the repository through the App flow.
+OAuth sign-in and GitHub App installation are separate integrations. OAuth lets a user authenticate and browse their GitHub account repositories; OAuth alone does not configure automatic App webhook delivery. A repository must be connected through the GitHub App flow for App-based reviews.
 
 ## Architecture
 
 ```text
 GitHub App pull_request webhook
-  → Express webhook handler (raw-body HMAC signature verification)
+  → Express webhook handler (HMAC-SHA256 over raw request body)
   → BullMQ job in Redis
-  → background review worker
+  → Render background worker
   → fetch and clean the PR diff
   → Groq AI analysis
   → diff-aware finding validation
@@ -28,102 +28,163 @@ GitHub App pull_request webhook
   → CodeGuard dashboard
 ```
 
-The webhook handler checks supported pull request events and repository association before queueing. The worker removes excluded files such as dependency lockfiles and build output before sending the diff to Groq. The finding validator checks that reported paths exist in the supplied diff, that evidence excerpts correspond to added code, and that line locations map to relevant diff lines. These checks help reject unsupported locations and claims; they do not guarantee semantic correctness. AI findings can be missed or incorrectly reported.
-
-The dashboard provides repository search and connection management, plus review history, statuses, findings, and suggested fixes. GitHub App-connected repositories use the App installation for review delivery. Existing OAuth-connected repositories remain distinguishable and are not silently converted to App connections.
+The webhook handler verifies signatures, checks supported PR actions and repository association, and queues the job before acknowledging supported events. The worker fetches the PR diff, removes excluded files such as dependency lockfiles and build output, and analyzes the remaining diff. The validator checks that paths appear in the diff, that evidence excerpts correspond to added code, and that line locations map to relevant diff lines. These checks reduce unsupported findings but do not guarantee semantic correctness. AI findings can be missed or incorrectly reported.
 
 ## Technology
 
 - **Frontend:** React, Vite, Tailwind CSS, React Router, React Markdown, `remark-gfm`, Lucide React.
 - **Backend:** Node.js (ES modules), Express, Mongoose.
-- **Data and jobs:** MongoDB for users, repositories, reviews, and findings; Redis and BullMQ for queued background processing.
-- **AI:** Groq API using `openai/gpt-oss-20b`.
-- **GitHub:** GitHub App installation/API authentication for repository delivery and review actions; GitHub OAuth for CodeGuard sign-in and account repository access; JWT for CodeGuard API authentication.
-- **Local infrastructure:** Docker Compose provides Redis. MongoDB must be available separately.
+- **Data and jobs:** MongoDB, Redis, BullMQ.
+- **AI:** Groq API with `openai/gpt-oss-20b`.
+- **GitHub:** GitHub App for installation-based repository access and webhooks; GitHub OAuth App for CodeGuard sign-in; JWT for CodeGuard API authentication.
+- **Local infrastructure:** Docker Compose starts Redis only. MongoDB is external.
 
 ## Local development
 
-Prerequisites: Node.js and npm, Docker with Docker Compose, and a reachable MongoDB instance. GitHub and Groq credentials are needed to use their respective integrations.
+Requires Node.js 22.12 or later, npm, Docker with Compose, a reachable MongoDB instance, and credentials for the integrations you want to run. There is no root `package.json`.
 
-There is no root `package.json`; install and run the client and server separately. Start Redis from the repository root:
+Start Redis from the repository root:
 
 ```bash
 docker compose up -d redis
 ```
 
-In a second terminal, install and start the backend:
+In one terminal, start the backend (Express API and MongoDB connection):
 
 ```bash
 cd server
-npm install
+npm ci
 npm run dev
 ```
 
-The backend loads `server/.env`. Its startup connects to MongoDB and imports the BullMQ worker into the same server process; a separate worker command is not required. Ensure `MONGODB_URI` points to a reachable MongoDB database. Redis defaults to `redis://localhost:6379` and can be overridden with `REDIS_URL`.
+In another terminal, start the background worker:
 
-In a third terminal, install and start the Vite client:
+```bash
+cd server
+npm run worker
+```
+
+In a third terminal, start the Vite frontend:
 
 ```bash
 cd client
-npm install
+npm ci
 npm run dev
 ```
 
-The client uses `client/.env` for Vite variables. The default local origins are `http://localhost:5173` (frontend) and `http://localhost:5000` (backend). Set `VITE_API_BASE_URL` to the backend origin and `FRONTEND_URL` to the frontend origin when using different hosts or ports. Trailing slashes are removed when the URLs are used.
+The server reads `server/.env`; Vite reads `client/.env`. Copy the corresponding example files and fill in local values. The frontend defaults to `http://localhost:5173`; the API defaults to `http://localhost:5000`; Redis defaults to `redis://localhost:6379` when `REDIS_URL` is unset. For the full app, backend startup requires `MONGODB_URI`, `REDIS_URL`, `GROQ_API_KEY`, `JWT_SECRET`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_APP_ID`, `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`, `GITHUB_APP_INSTALL_URL`, `GITHUB_APP_CALLBACK_URL`, `WEBHOOK_SECRET`, and one of `GITHUB_APP_PRIVATE_KEY_PATH` or `GITHUB_APP_PRIVATE_KEY`. Render additionally requires `FRONTEND_URL`; local development defaults it to `http://localhost:5173` when unset. The worker requires `MONGODB_URI`, `REDIS_URL`, `GROQ_API_KEY`, `GITHUB_APP_ID`, and a GitHub App private key path or value.
 
-### Environment configuration
+## Deploy
 
-No `.env.example` file is currently present. Create local environment files without committing credentials. The backend reads the following variables; the client reads the Vite variable:
+Deploy the frontend and backend independently. The worker is a separate Render Background Worker, so web service instances do not start duplicate queue consumers. Keep the Web Service at one instance unless the demo rate limiter is moved to shared storage: it currently uses an in-memory per-process map. Both Render services must use the same repository revision and the same MongoDB, Redis, Groq, and GitHub App settings needed by their code paths. The Render and Vercel URLs refer to each other; create the services, record their assigned domains, then set the final URL variables and redeploy before enabling GitHub delivery.
 
-| Variable | Used by | Purpose |
-| --- | --- | --- |
-| `PORT` | Backend | Express port; defaults to `5000`. |
-| `MONGODB_URI` | Backend | MongoDB connection string. |
-| `REDIS_URL` | Backend | Redis connection; defaults to local Redis on port `6379`. |
-| `GROQ_API_KEY` | Backend | Groq API authentication for review analysis. |
-| `JWT_SECRET` | Backend | Signs and verifies CodeGuard API tokens. |
-| `FRONTEND_URL` | Backend | Frontend origin used for OAuth and GitHub App callback redirects; defaults to local Vite. |
-| `GITHUB_CLIENT_ID` | Backend | GitHub OAuth App client ID for CodeGuard sign-in. |
-| `GITHUB_CLIENT_SECRET` | Backend | GitHub OAuth App client secret. |
-| `VITE_API_BASE_URL` | Client build | Backend origin used by frontend API requests; defaults to local Express. |
-| `GITHUB_APP_ID` | Backend | GitHub App ID used to sign App JWTs. |
-| `GITHUB_APP_PRIVATE_KEY_PATH` | Backend | Preferred path to the GitHub App PEM private key. |
-| `GITHUB_APP_PRIVATE_KEY` | Backend | Alternative inline PEM private key; escaped `\\n` newlines are converted. |
-| `GITHUB_APP_CLIENT_ID` | Backend | GitHub App client ID for its separate user-authorization flow. |
-| `GITHUB_APP_CLIENT_SECRET` | Backend | GitHub App client secret for that flow. |
-| `GITHUB_APP_INSTALL_URL` | Backend | GitHub App installation URL used to begin installation. |
-| `GITHUB_APP_CALLBACK_URL` | Backend | App authorization callback URL; must match the GitHub App registration. |
-| `WEBHOOK_SECRET` | Backend | Secret used to verify GitHub webhook signatures; must match the App's webhook secret. |
+### 1. Configure MongoDB Atlas
 
-Keep secret values out of source control. The OAuth callback URL is configured in GitHub Developer Settings rather than through a separate callback environment variable.
+Use an existing Atlas database if it is appropriate for CodeGuard, or create a database and a database user with access to it. Add the Render service's outbound IP addresses to Atlas Network Access; if using a Render plan with static outbound IPs, allow those addresses. Do not expose database credentials in the repository. Copy the Atlas connection URI into `MONGODB_URI` for both Render services.
 
-## GitHub configuration
+### 2. Create hosted Redis
 
-GitHub App delivery requires a publicly reachable HTTPS backend. Replace `<backend-origin>` below with that backend's origin:
+Create a hosted Redis-compatible instance reachable from both Render services. Use the provider's TLS URL (`rediss://...`) when supplied. Set the same `REDIS_URL` on the Render Web Service and Background Worker. The API producer and worker use the same `code-review-queue` queue name.
 
-| GitHub setting | URL |
+### 3. Deploy the Render Web Service
+
+Create a **Web Service** from this repository with:
+
+| Setting | Value |
 | --- | --- |
-| GitHub App webhook | `<backend-origin>/api/webhooks/github` |
-| GitHub App Setup URL | `<backend-origin>/api/github/app/installations/setup` |
-| GitHub App callback URL | `<backend-origin>/api/github/app/callback` (must match `GITHUB_APP_CALLBACK_URL`) |
-| CodeGuard OAuth App callback URL | `<backend-origin>/api/auth/github/callback` |
+| Root Directory | `server` |
+| Runtime | Node |
+| Build Command | `npm ci` |
+| Start Command | `npm start` |
+| Health Check Path | `/healthz` |
 
-Configure the GitHub App with:
+The start script runs `node src/server.js`. The web process validates required configuration, connects to MongoDB and Redis before listening, handles `SIGTERM`/`SIGINT`, and serves `/healthz` readiness checks. `TRUST_PROXY_HOPS` defaults to `loopback`, which preserves local/ngrok development behavior. Render traffic passes through platform proxies; verify the forwarded proxy chain for the deployed service and set this variable to the corresponding numeric hop count. Do not set it to `true` or trust arbitrary forwarded headers. Until the hop count is verified, the rate limiter may see a shared proxy address rather than each visitor's address.
 
-- **Repository permissions:** Pull requests: Read to receive pull request events and read PR diffs. For optional PR comments, grant Issues: Write or Pull requests: Write.
-- **Webhook events:** Subscribe to `pull_request` and `installation`. CodeGuard handles pull request actions `opened` and `synchronize`, and installation actions `created`, `suspend`, `unsuspend`, and `deleted`. It also handles `installation_repositories` actions `added` and `removed`; GitHub delivers this event to Apps by default, so it is not a selectable subscription.
-- **Webhook secret:** Configure a secret in GitHub and set the same value as backend `WEBHOOK_SECRET`.
-- **Installation authorization:** Leave “Request user authorization during installation” disabled. The current flow associates the installation and then performs a separate authorization callback.
+Set the backend environment variables listed below. Use the deployed Vercel frontend origin in `FRONTEND_URL`; add any other exact allowed browser origins to `CORS_ORIGINS` as a comma-separated list. Do not include paths or trailing slashes in origins.
 
-For CodeGuard sign-in, configure a GitHub OAuth App with the OAuth callback URL above. The implementation requests `repo` and `read:user` scopes. This OAuth App is separate from the GitHub App and its client credentials.
+Set `NODE_ENV=production` to disable the local development CORS origins. Set `TRUST_PROXY_HOPS` to the verified Render proxy hop count for client IP rate limiting; do not assume a value before checking the actual forwarded chain.
 
-## Project checks
+The backend requires the final `FRONTEND_URL` at startup. Create the Render service to obtain its domain, then create/deploy the Vercel project in step 4. Return to Render with both final origins, complete the required environment, and run the successful backend deploy. An initial Render startup without its required environment will fail fast with the missing variable names.
 
-Run frontend checks from `client/`:
+### 4. Deploy the Vite frontend to Vercel
 
-```bash
-npm run lint
-npm run build
+Create a Vercel project from this repository with:
+
+| Setting | Value |
+| --- | --- |
+| Root Directory | `client` |
+| Framework Preset | Vite |
+| Install Command | `npm ci` |
+| Build Command | `npm run build` |
+| Output Directory | `dist` |
+| Node.js Version | `22.x` |
+
+The included [`client/vercel.json`](client/vercel.json) rewrites browser routes such as `/dashboard` to the Vite entry document so direct visits and refreshes work with React Router.
+
+Set `VITE_API_BASE_URL` to the Render Web Service's HTTPS origin (origin only, no path or trailing slash). Vite embeds this value at build time, so redeploy after changing it. Production builds fail if it is missing; local development still defaults to `http://localhost:5000`. The frontend uses this configured API origin for OAuth login and API requests.
+
+After Vercel assigns its production domain, set that origin as Render `FRONTEND_URL` (and in `CORS_ORIGINS` if you list origins explicitly), set `NODE_ENV=production`, verify `TRUST_PROXY_HOPS`, complete the Render Web Service environment, and redeploy. Confirm `https://<render-web-service-domain>/healthz` returns `200` before adding GitHub webhooks.
+
+### 5. Deploy the Render Background Worker
+
+Create a **Background Worker** from the same repository and commit:
+
+| Setting | Value |
+| --- | --- |
+| Root Directory | `server` |
+| Runtime | Node |
+| Build Command | `npm ci` |
+| Start Command | `npm run worker` |
+
+The worker entry point connects to MongoDB and Redis, then consumes `code-review-queue`. Give it the shared variables listed below plus the GitHub App ID and private key configuration used to authenticate App-backed review jobs. It does not need `PORT`, `JWT_SECRET`, `FRONTEND_URL`, `CORS_ORIGINS`, OAuth client credentials, or `WEBHOOK_SECRET`. A Render Environment Group can hold the shared variables and App private-key secret file for both services.
+
+### 6. Configure GitHub OAuth and GitHub App
+
+The **GitHub OAuth App** is used for CodeGuard login. Set its Authorization callback URL to:
+
+```text
+https://<render-web-service-domain>/api/auth/github/callback
 ```
 
-The backend package provides `npm run dev` and `npm start` scripts. There is no dedicated backend test script in the current package configuration.
+The OAuth implementation requests `repo` and `read:user` scopes. Set `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` on the Render Web Service.
+
+Configure the **GitHub App** as follows:
+
+- **Webhook URL:** `https://<render-web-service-domain>/api/webhooks/github`
+- **Setup URL:** `https://<render-web-service-domain>/api/github/app/installations/setup`
+- **Callback URL:** `https://<render-web-service-domain>/api/github/app/callback`; this must exactly match `GITHUB_APP_CALLBACK_URL`.
+- **Webhook secret:** set the App's webhook secret and the same value in backend `WEBHOOK_SECRET`.
+- **Repository permissions:** Pull requests: Read, for PR events and diff retrieval. For optional comments, grant Issues: Write or Pull requests: Write.
+- **Webhook subscriptions:** `pull_request` and `installation`. CodeGuard handles PR actions `opened` and `synchronize`, and installation actions `created`, `suspend`, `unsuspend`, and `deleted`. It also handles `installation_repositories` actions `added` and `removed`; GitHub delivers that event to Apps by default.
+- Leave **Request user authorization during installation** disabled for the current two-step installation/authorization flow.
+
+Set `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY_PATH` or `GITHUB_APP_PRIVATE_KEY`, `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`, `GITHUB_APP_INSTALL_URL`, and `GITHUB_APP_CALLBACK_URL` on the Render Web Service. Set `GITHUB_APP_ID` and the private key configuration on the Background Worker too. For a secret file named `codeguard-private-key.pem`, Render exposes it at `/etc/secrets/codeguard-private-key.pem`; set `GITHUB_APP_PRIVATE_KEY_PATH` to that path on both services, or link a shared secret file through an Environment Group. Never commit the key. App installation and OAuth callback endpoints, as well as GitHub webhooks, require a publicly reachable HTTPS backend.
+
+### Environment variables by service
+
+The repository includes [`server/.env.example`](server/.env.example) and [`client/.env.example`](client/.env.example). They contain placeholders only.
+
+**Render Web Service**
+
+- Required at Render backend startup: `MONGODB_URI`, `REDIS_URL`, `GROQ_API_KEY`, `JWT_SECRET`, `FRONTEND_URL`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_APP_ID`, `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`, `GITHUB_APP_INSTALL_URL`, `GITHUB_APP_CALLBACK_URL`, `WEBHOOK_SECRET`, and either `GITHUB_APP_PRIVATE_KEY_PATH` or `GITHUB_APP_PRIVATE_KEY`.
+- Frontend/CORS/proxy: `CORS_ORIGINS` (optional if only `FRONTEND_URL` is needed), `TRUST_PROXY_HOPS` (set to the verified Render proxy hop count), `PORT` (provided by Render; local default is `5000`).
+- Runtime: `NODE_ENV` (set to `production` on Render).
+
+**Render Background Worker**
+
+- Required at worker startup: `MONGODB_URI`, `REDIS_URL`, `GROQ_API_KEY`, `GITHUB_APP_ID`, and either `GITHUB_APP_PRIVATE_KEY_PATH` or `GITHUB_APP_PRIVATE_KEY`.
+
+**Vercel project**
+
+- `VITE_API_BASE_URL` — Render Web Service HTTPS origin; this is a public API URL, not a secret.
+
+The backend and worker must share the exact `MONGODB_URI`, `REDIS_URL`, and `GROQ_API_KEY`. App-backed jobs also require matching `GITHUB_APP_ID` and private key settings on both services. OAuth and webhook secrets belong only on the Web Service.
+
+## Checks
+
+```bash
+cd client && npm run lint && npm run build
+cd ../server && npm test
+```
+
+The backend tests use Node's built-in test runner.

@@ -3,7 +3,8 @@ import { Worker } from "bullmq";
 import Groq from "groq-sdk";
 import dotenv from "dotenv";
 
-import { redisConnection } from "../config/queue.js";
+import { redisConnection } from "../config/redis.js";
+import { REVIEW_QUEUE_NAME } from "../config/queueNames.js";
 import { getPRDiff, postPRComment } from '../services/githubService.js';
 import { getInstallationAccessToken } from '../services/githubAppService.js';
 import { cleanDiff } from "../analyzers/staticAnalyzer.js";
@@ -453,19 +454,21 @@ export const createReviewProcessor = ({
     }
   };
 
-const worker = new Worker(
-  "code-review-queue",
-  createReviewProcessor(),
-  {
-    connection: redisConnection,
-    concurrency: 5,
-  }
-);
-
-worker.on("failed", (job, error) => {
-  console.error(
-    `JOB FAILED: ${job?.id}, Reason: ${error.message}`
+export const startReviewWorker = () => {
+  const worker = new Worker(
+    REVIEW_QUEUE_NAME,
+    createReviewProcessor(),
+    {
+      connection: redisConnection,
+      concurrency: 5,
+    },
   );
-});
 
-export default worker;
+  worker.on("failed", (job, error) => {
+    console.error(`JOB FAILED: ${job?.id}, Reason: ${error.message}`);
+  });
+
+  return worker;
+};
+
+export default startReviewWorker;

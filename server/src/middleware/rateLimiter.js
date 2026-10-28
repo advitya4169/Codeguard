@@ -17,8 +17,8 @@ const MAX_REQUESTS = 10;      // per IP per window
 const ipTimestamps = new Map();
 
 export function demoRateLimiter(req, res, next) {
-  // Express resolves req.ip from the socket peer. Forwarded values are used
-  // only when the peer is in the narrowly trusted loopback proxy range.
+  // Express resolves req.ip from the socket peer and only the proxy hops
+  // configured by the server's TRUST_PROXY_HOPS setting.
   const ip = req.ip || req.socket?.remoteAddress || 'unknown';
 
   const now = Date.now();
