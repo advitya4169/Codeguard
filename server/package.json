@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node src/server.js",
+    "start:all": "node src/startAll.js",
     "dev": "node --watch src/server.js",
     "worker": "node src/worker.js",
     "test": "node --test"

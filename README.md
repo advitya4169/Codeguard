@@ -100,6 +100,8 @@ Create a **Web Service** from this repository with:
 
 The start script runs `node src/server.js`. The web process validates required configuration, connects to MongoDB and Redis before listening, handles `SIGTERM`/`SIGINT`, and serves `/healthz` readiness checks. `TRUST_PROXY_HOPS` defaults to `loopback`, which preserves local/ngrok development behavior. Render traffic passes through platform proxies; verify the forwarded proxy chain for the deployed service and set this variable to the corresponding numeric hop count. Do not set it to `true` or trust arbitrary forwarded headers. Until the hop count is verified, the rate limiter may see a shared proxy address rather than each visitor's address.
 
+For a **free demo**, use `npm run start:all` as the Render Web Service Start Command instead. It starts the API and one worker in the same service; do not also start a separate worker. This is not reliable for continuous production background processing because Render Free services sleep when idle, so reviews wait until the service wakes.
+
 Set the backend environment variables listed below. Use the deployed Vercel frontend origin in `FRONTEND_URL`; add any other exact allowed browser origins to `CORS_ORIGINS` as a comma-separated list. Do not include paths or trailing slashes in origins.
 
 Set `NODE_ENV=production` to disable the local development CORS origins. Set `TRUST_PROXY_HOPS` to the verified Render proxy hop count for client IP rate limiting; do not assume a value before checking the actual forwarded chain.
@@ -125,9 +127,9 @@ Set `VITE_API_BASE_URL` to the Render Web Service's HTTPS origin (origin only, n
 
 After Vercel assigns its production domain, set that origin as Render `FRONTEND_URL` (and in `CORS_ORIGINS` if you list origins explicitly), set `NODE_ENV=production`, verify `TRUST_PROXY_HOPS`, complete the Render Web Service environment, and redeploy. Confirm `https://<render-web-service-domain>/healthz` returns `200` before adding GitHub webhooks.
 
-### 5. Deploy the Render Background Worker
+### 5. Deploy the Render Background Worker (separate-service deployment)
 
-Create a **Background Worker** from the same repository and commit:
+For a paid deployment that needs a separately managed worker, create a **Background Worker** from the same repository and commit:
 
 | Setting | Value |
 | --- | --- |
