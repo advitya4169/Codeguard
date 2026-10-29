@@ -208,6 +208,8 @@ export const createReviewProcessor = ({
   let repo;
   let authToken;
   let needsInstallationToken = false;
+  let analysisCompleted = false;
+  let completedFindingsCount = 0;
 
   try {
       if (hasInstallationMetadata) {
@@ -386,67 +388,98 @@ export const createReviewProcessor = ({
 
       // 7. Save findings, if any were returned.
       if (findingDocs.length > 0) {
-      await FindingModel.insertMany(findingDocs); // Your existing working code
-      
-      // --- NEW: STAGE 7 GITHUB POSTING ---
-      await job.updateProgress(90);
-      console.log('- Formatting findings for GitHub...');
-      
-      let markdownReport = `## 🛡️ CodeGuard Review\n\nGroq analyzed this PR and found **${findingDocs.length}** issues:\n\n`;
-      markdownReport += `| Severity | Category | File | Line | Finding | Suggested Fix |\n`;
-      markdownReport += `| :--- | :--- | :--- | :--- | :--- | :--- |\n`;
-      
-      findingDocs.forEach(f => {
-        const severityBadge = f.severity === 'critical' ? '🔴' : f.severity === 'high' ? '🟠' : f.severity === 'medium' ? '🟡' : '🔵';
-        
-        // Sanitize outputs to prevent Markdown table formatting from breaking
-        const safeExplanation = f.explanation ? f.explanation.replace(/\|/g, '-').replace(/\n/g, ' ') : 'N/A'; 
-        const safeFix = f.suggestedFix ? f.suggestedFix.replace(/\|/g, '-').replace(/\n/g, ' ') : 'N/A';
-        
-        markdownReport += `| ${severityBadge} ${f.severity.toUpperCase()} | ${f.category} | \`${f.filePath}\` | \`${f.lineNumber || 'N/A'}\` | ${safeExplanation} | ${safeFix} |\n`;
-      });
-      
-      markdownReport += `\n*Processed by CodeGuard (Model: openai/gpt-oss-20b)*`;
-      
-      try {
-        await postPRCommentFn(repoFullName, prNumber, authToken, markdownReport);
-        logger.log('✅ Posted review comment to GitHub PR!');
-      } catch (error) {
-        // Comment delivery is optional; the analyzed findings are already persisted.
-        logger.error(
-          `GitHub PR comment failed for ${repoFullName}#${prNumber}; review results remain saved.`,
-          {
-            status: Number.isInteger(error?.status) ? error.status : undefined,
-            errorType: error?.name || 'Error',
-            endpoint: error?.endpoint,
-            responseMessage: error?.responseMessage,
-            acceptedPermissions: error?.acceptedPermissions,
-          }
-        );
+        await FindingModel.insertMany(findingDocs);
       }
-      // -----------------------------------
-    }
 
-      // 8. Mark the review as completed.
+      // Persist analysis completion before the optional external comment. Once
+      // this succeeds, a later comment-side issue cannot cause AI analysis to
+      // run again and post a duplicate comment on a retry.
+      await job.updateProgress(90);
       reviewJob.status = "completed";
       reviewJob.summary = `Processed ${findings.length} findings.`;
-
       await reviewJob.save();
-      await job.updateProgress(100);
+      analysisCompleted = true;
+      completedFindingsCount = findings.length;
+      try {
+        await job.updateProgress(100);
+      } catch (error) {
+        try {
+          logger.error('Review results were saved, but BullMQ progress could not be updated.', {
+            errorType: error?.name || 'Error',
+          });
+        } catch {
+          // Progress reporting must not undo a successfully persisted review.
+        }
+      }
 
-      logger.log(
-        `COMPLETE: Saved ${findings.length} findings to MongoDB.`
-      );
+      if (findingDocs.length > 0) {
+        console.log('- Formatting findings for GitHub...');
+
+        let markdownReport = `## 🛡️ CodeGuard Review\n\nGroq analyzed this PR and found **${findingDocs.length}** issues:\n\n`;
+        markdownReport += `| Severity | Category | File | Line | Finding | Suggested Fix |\n`;
+        markdownReport += `| :--- | :--- | :--- | :--- | :--- | :--- |\n`;
+
+        findingDocs.forEach(f => {
+          const severityBadge = f.severity === 'critical' ? '🔴' : f.severity === 'high' ? '🟠' : f.severity === 'medium' ? '🟡' : '🔵';
+
+          // Sanitize outputs to prevent Markdown table formatting from breaking
+          const safeExplanation = f.explanation ? f.explanation.replace(/\|/g, '-').replace(/\n/g, ' ') : 'N/A';
+          const safeFix = f.suggestedFix ? f.suggestedFix.replace(/\|/g, '-').replace(/\n/g, ' ') : 'N/A';
+
+          markdownReport += `| ${severityBadge} ${f.severity.toUpperCase()} | ${f.category} | \`${f.filePath}\` | \`${f.lineNumber || 'N/A'}\` | ${safeExplanation} | ${safeFix} |\n`;
+        });
+
+        markdownReport += `\n*Processed by CodeGuard (Model: openai/gpt-oss-20b)*`;
+
+        try {
+          await postPRCommentFn(repoFullName, prNumber, authToken, markdownReport);
+          logger.log('✅ Posted review comment to GitHub PR!');
+        } catch (error) {
+          // Comment delivery is optional; the analyzed findings are already persisted.
+          logger.error(
+            `GitHub PR comment failed for ${repoFullName}#${prNumber}; review results remain saved.`,
+            {
+              status: Number.isInteger(error?.status) ? error.status : undefined,
+              errorType: error?.name || 'Error',
+              endpoint: error?.endpoint,
+              responseMessage: error?.responseMessage,
+              acceptedPermissions: error?.acceptedPermissions,
+            }
+          );
+        }
+      }
+
+      try {
+        logger.log(`COMPLETE: Saved ${findings.length} findings to MongoDB.`);
+      } catch {
+        // A logging failure must not re-run completed analysis or comments.
+      }
 
       return {
         status: "success",
         findingsCount: findings.length,
       };
     } catch (error) {
-      // Keep failed reviews visible instead of leaving them processing.
+      if (analysisCompleted) {
+        try {
+          logger.error('Review completed, but a post-completion operation failed.', {
+            errorType: error?.name || 'Error',
+          });
+        } catch {
+          // Do not retry completed analysis because diagnostics failed.
+        }
+        return { status: "success", findingsCount: completedFindingsCount };
+      }
+
+      // Keep the persisted state aligned with BullMQ's automatic retry lifecycle.
       if (reviewJob) {
-        reviewJob.status = "failed";
-        reviewJob.summary = error.message;
+        const hasAutomaticRetry = Number.isInteger(job?.opts?.attempts) &&
+          Number.isInteger(job?.attemptsMade) &&
+          job.attemptsMade + 1 < job.opts.attempts;
+        reviewJob.status = hasAutomaticRetry ? "queued" : "failed";
+        reviewJob.summary = hasAutomaticRetry
+          ? "Review attempt failed. Another automatic attempt is queued."
+          : error.message;
         await reviewJob.save();
       }
 

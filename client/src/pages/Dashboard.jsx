@@ -30,7 +30,7 @@ import { FaGithub } from 'react-icons/fa';
 import { apiUrl } from '../config/api.js';
 import { filterRepositories } from '../utils/filterRepositories.js';
 import { hasActiveReviews } from '../utils/reviews.js';
-import { requestReviewHistory } from '../utils/reviewHistory.js';
+import { requestReviewHistory, requestReviewRetry } from '../utils/reviewHistory.js';
 
 const SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'suggestion'];
 const REVIEW_POLL_INTERVAL_MS = 5000;
@@ -199,6 +199,8 @@ export default function Dashboard() {
   const [loadingReviews, setLoadingReviews] = useState(false);
   const [reviewsError, setReviewsError] = useState('');
   const [reviewsRetry, setReviewsRetry] = useState(0);
+  const [retryingReviewId, setRetryingReviewId] = useState(null);
+  const [reviewRetryError, setReviewRetryError] = useState(null);
 
   const handleUnauthorized = useCallback(() => {
     localStorage.removeItem('codeguard_token');
@@ -495,6 +497,36 @@ export default function Dashboard() {
     setReviewsError('');
     setLoadingReviews(true);
     setReviewsRetry((attempt) => attempt + 1);
+  };
+
+  const handleRetryReview = async (review) => {
+    if (!selectedRepoAppConnected || !selectedRepo || review.status !== 'failed' || retryingReviewId) return;
+    setRetryingReviewId(review._id);
+    setReviewRetryError(null);
+    try {
+      const token = localStorage.getItem('codeguard_token');
+      await requestReviewRetry(selectedRepo.id, review._id, token);
+      setReviews((current) => current.map((item) => (
+        item._id === review._id
+          ? { ...item, status: 'queued', summary: 'Review retry queued.' }
+          : item
+      )));
+      setReviewsRetry((attempt) => attempt + 1);
+    } catch (error) {
+      if (error.status === 401) {
+        handleUnauthorized();
+      } else {
+        setReviewRetryError({
+          reviewId: review._id,
+          message: error.message || 'Could not retry this review.',
+        });
+        // A timeout can happen after the server accepted the retry; reload to
+        // reconcile the UI with the persisted review status.
+        setReviewsRetry((attempt) => attempt + 1);
+      }
+    } finally {
+      setRetryingReviewId(null);
+    }
   };
 
   const handleStartGitHubAppInstall = async () => {
@@ -1002,10 +1034,27 @@ export default function Dashboard() {
 
                         {review.status === 'failed' && (
                           <div className="border-b border-red-400/10 bg-red-400/[0.025] px-4 py-3 sm:px-5">
-                            <p className="text-xs leading-relaxed text-slate-400">
-                              This analysis did not complete. Check the review message above and the connected GitHub account’s repository access. Refreshing history only reloads the saved result; after resolving the cause, push a new commit to trigger a fresh review.
-                            </p>
+                            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                              <p className="text-xs leading-relaxed text-slate-400">
+                                This analysis did not complete. Check the review message above and resolve any GitHub access or service issue before retrying.
+                              </p>
+                              <button
+                                type="button"
+                                onClick={() => handleRetryReview(review)}
+                                disabled={Boolean(retryingReviewId)}
+                                className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg border border-indigo-400/25 bg-indigo-400/10 px-3 py-2 text-xs font-semibold text-indigo-200 transition hover:border-indigo-300/40 hover:bg-indigo-400/15 disabled:cursor-wait disabled:opacity-60 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
+                              >
+                                {retryingReviewId === review._id
+                                  ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                                  : <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />}
+                                {retryingReviewId === review._id ? 'Queueing retry…' : 'Retry review'}
+                              </button>
+                            </div>
                           </div>
+                        )}
+
+                        {reviewRetryError?.reviewId === review._id && review.status === 'failed' && (
+                          <p className="border-b border-red-400/10 px-4 py-2 text-xs text-red-200" role="alert">{reviewRetryError.message}</p>
                         )}
 
                         <div className="space-y-4 p-4 sm:p-5">
