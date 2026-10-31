@@ -69,15 +69,18 @@ const [
 const app = express();
 
 const parseOrigin = (value, variableName) => {
+  let url;
   try {
-    const url = new URL(value);
-    if (!['http:', 'https:'].includes(url.protocol) || url.origin !== value.replace(/\/$/, '')) {
-      throw new Error('not an origin');
-    }
-    return url.origin;
+    url = new URL(value);
   } catch {
     throw new Error(`${variableName} entries must be HTTP(S) origins without paths.`);
   }
+
+  if (!['http:', 'https:'].includes(url.protocol) || url.origin !== value.replace(/\/$/, '')) {
+    throw new Error(`${variableName} entries must be HTTP(S) origins without paths.`);
+  }
+
+  return url.origin;
 };
 
 const allowedOrigins = new Set([

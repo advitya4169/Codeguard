@@ -283,10 +283,10 @@ export const getGitHubAppUserInstallation = async (
     throw new Error('GitHub App user authorization is invalid.');
   }
 
-  const installations = [];
+  let fetchedCount = 0;
   let page = 1;
   let totalCount = null;
-  while (totalCount === null || installations.length < totalCount) {
+  while (totalCount === null || fetchedCount < totalCount) {
     let response;
     try {
       response = await fetchImpl(
@@ -307,7 +307,7 @@ export const getGitHubAppUserInstallation = async (
     }
 
     if (totalCount === null) totalCount = result.total_count;
-    installations.push(...result.installations);
+    fetchedCount += result.installations.length;
 
     const match = result.installations.find(
       (installation) => String(installation?.id) === normalizedInstallationId,
@@ -329,7 +329,7 @@ export const getGitHubAppUserInstallation = async (
       };
     }
 
-    if (result.installations.length === 0 || installations.length >= totalCount) break;
+    if (result.installations.length === 0 || fetchedCount >= totalCount) break;
     page += 1;
   }
 
