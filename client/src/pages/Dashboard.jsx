@@ -1107,8 +1107,22 @@ function mergeLoadedRepositories(existingRepositories, incomingRepositories) {
   });
   return Array.from(repositoriesById.values());
 }
+function getStoredUsername() {
+  try {
+    const token = localStorage.getItem('codeguard_token');
+    if (!token) return '';
+    const parts = token.split('.');
+    if (parts.length < 2) return '';
+    const payloadJson = atob(parts[1].replace(/-/g, '+').replace(/_/g, '/'));
+    const payload = JSON.parse(payloadJson);
+    return typeof payload?.username === 'string' ? payload.username : '';
+  } catch {
+    return '';
+  }
+}
 export default function Dashboard() {
   const navigate = useNavigate();
+  const [currentUsername] = useState(() => getStoredUsername());
   const [searchParams, setSearchParams] = useSearchParams(); // Sidebar State
   const [repos, setRepos] = useState([]);
   const [loadingRepos, setLoadingRepos] = useState(true);
@@ -1732,7 +1746,10 @@ export default function Dashboard() {
       <h1 className="text-xl font-semibold text-cg-primary">Repositories</h1>
       <p className="mt-1 text-sm text-cg-muted">Manage App connections and browse account repositories.</p>
     </div>
-    <button type="button" onClick={() => setActiveView('dashboard')} className="rounded-md border border-cg-border px-3 py-1.5 text-xs text-cg-muted hover:bg-cg-raised hover:text-cg-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400">Back to dashboard</button>
+    <div className="flex items-center gap-2">
+      <button type="button" onClick={() => setActiveView('settings')} className="rounded-md border border-cg-border px-3 py-1.5 text-xs font-medium text-cg-muted hover:bg-cg-raised hover:text-cg-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400">Settings</button>
+      <button type="button" onClick={() => setActiveView('dashboard')} className="rounded-md border border-cg-border px-3 py-1.5 text-xs text-cg-muted hover:bg-cg-raised hover:text-cg-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400">Back to dashboard</button>
+    </div>
   </header>
 
   <div className="grid min-w-0 gap-3 lg:grid-cols-2">
@@ -1961,53 +1978,146 @@ export default function Dashboard() {
                 </div>}
               </>}
             </section>            <section aria-label="CodeGuard settings" hidden={activeView !== 'settings'} className="min-w-0 space-y-4">
-  <header className="border-b border-cg-border pb-4">
-    <h1 className="text-xl font-semibold text-cg-primary">Settings</h1>
-    <p className="mt-1 text-sm text-cg-muted">Manage the GitHub connections used by CodeGuard.</p>
+  <header className="flex flex-wrap items-end justify-between gap-3 border-b border-cg-border pb-4">
+    <div>
+      <h1 className="text-xl font-semibold text-cg-primary">Settings</h1>
+      <p className="mt-1 text-sm text-cg-muted">Manage your connected account, integrations, and review engine configuration.</p>
+    </div>
+    <button type="button" onClick={() => setActiveView('repositories')} className="inline-flex items-center gap-1.5 rounded-md border border-cg-border px-3 py-1.5 text-xs font-medium text-cg-muted hover:bg-cg-raised hover:text-cg-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400">
+      <BookMarked className="h-3.5 w-3.5 text-blue-400" aria-hidden="true" />
+      <span>Go to Repositories</span>
+    </button>
   </header>
 
-  <div className="grid min-w-0 gap-3 lg:grid-cols-2">
-    <section className="min-w-0 rounded-xl border border-cg-border bg-cg-surface p-4" aria-labelledby="settings-oauth-heading">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-2.5">
-          <FaGithub className="h-4 w-4 shrink-0 text-slate-400" aria-hidden="true" />
-          <div>
-            <h2 id="settings-oauth-heading" className="text-sm font-semibold text-cg-primary">GitHub account · OAuth</h2>
-            <p className="mt-0.5 text-xs text-cg-muted">Sign-in and account repository discovery</p>
+  <div className="grid min-w-0 gap-4 lg:grid-cols-2">
+    <section className="flex flex-col justify-between min-w-0 rounded-xl border border-cg-border bg-cg-surface p-4" aria-labelledby="settings-oauth-heading">
+      <div>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-2.5">
+            <FaGithub className="h-4 w-4 shrink-0 text-slate-400" aria-hidden="true" />
+            <div>
+              <h2 id="settings-oauth-heading" className="text-sm font-semibold text-cg-primary">GitHub account</h2>
+              <p className="mt-0.5 text-xs text-cg-muted">OAuth connection & user identity</p>
+            </div>
+          </div>
+          {loadingRepos ? <span className="text-xs text-cg-muted">Checking access…</span> : repoError ? <span className={'text-xs font-medium ' + (repoReauthRequired ? 'text-amber-300' : 'text-red-300')}>{repoReauthRequired ? 'Reconnect needed' : 'Unavailable'}</span> : <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-300"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden="true" />Connected</span>}
+        </div>
+
+        {repoError && <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-red-400/20 bg-red-400/5 px-3 py-2" role="alert"><p className="text-xs text-red-100">{repoError}</p><div className="flex shrink-0 items-center gap-3">{repoReauthRequired && <a href={apiUrl('/api/auth/github')} className="text-xs font-semibold text-blue-300 hover:text-blue-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400">Reconnect</a>}<button type="button" onClick={() => setRepoRetry(attempt => attempt + 1)} className="inline-flex items-center gap-1 text-xs font-medium text-blue-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"><RefreshCw className="h-3 w-3" aria-hidden="true" /> Retry</button></div></div>}
+
+        <div className="mt-4 space-y-2 rounded-lg border border-cg-border/70 bg-cg-raised/50 p-3 text-xs">
+          <div className="flex items-center justify-between">
+            <span className="text-cg-muted">Connected User</span>
+            <span className="font-mono font-medium text-cg-primary">{currentUsername ? `@${currentUsername}` : 'Authenticated user'}</span>
+          </div>
+          <div className="flex items-center justify-between">
+            <span className="text-cg-muted">Auth Protocol</span>
+            <span className="text-cg-primary">GitHub OAuth 2.0</span>
+          </div>
+          <div className="flex items-center justify-between">
+            <span className="text-cg-muted">Authorized Scopes</span>
+            <span className="font-mono text-[11px] text-cg-primary">repo, read:user</span>
           </div>
         </div>
-        {loadingRepos ? <span className="text-xs text-cg-muted">Checking access…</span> : repoError ? <span className={'text-xs font-medium ' + (repoReauthRequired ? 'text-amber-300' : 'text-red-300')}>{repoReauthRequired ? 'Reconnect needed' : 'Unavailable'}</span> : <span className="text-xs font-medium text-emerald-300">Connected</span>}
       </div>
-      {repoError ? <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-red-400/20 bg-red-400/5 px-3 py-2" role="alert"><p className="text-xs text-red-100">{repoError}</p><div className="flex shrink-0 items-center gap-3">{repoReauthRequired && <a href={apiUrl('/api/auth/github')} className="text-xs font-semibold text-blue-300 hover:text-blue-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400">Reconnect</a>}<button type="button" onClick={() => setRepoRetry(attempt => attempt + 1)} className="inline-flex items-center gap-1 text-xs font-medium text-blue-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"><RefreshCw className="h-3 w-3" aria-hidden="true" /> Retry</button></div></div> : loadingRepos ? <p className="mt-3 flex items-center gap-2 text-xs text-cg-muted" role="status"><Loader2 className="h-3.5 w-3.5 animate-spin text-blue-300" aria-hidden="true" /> Checking the connected GitHub account…</p> : <p className="mt-3 text-xs text-cg-muted">{repos.length ? repos.length + ' repositories returned on this page.' : 'No repositories returned on this page.'}</p>}
-      <div className="mt-4 border-t border-cg-border pt-3">
-        <p className="text-xs text-cg-muted">OAuth account access is separate from GitHub App installation access.</p>
-        <button type="button" onClick={() => setActiveView('repositories')} className="mt-3 rounded-md border border-cg-border px-3 py-1.5 text-xs font-medium text-cg-primary hover:bg-cg-raised focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400">Browse repositories</button>
+
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-cg-border pt-3">
+        <span className="text-xs text-cg-muted">Repository connections are managed centrally.</span>
+        <button type="button" onClick={() => setActiveView('repositories')} className="inline-flex items-center gap-1 text-xs font-medium text-blue-400 hover:text-blue-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400">
+          Manage in Repositories →
+        </button>
       </div>
     </section>
 
-    <section className="min-w-0 rounded-xl border border-cg-border bg-cg-surface p-4" aria-labelledby="settings-app-heading">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-2.5">
-          <FaGithub className="h-4 w-4 shrink-0 text-blue-300" aria-hidden="true" />
-          <div>
-            <h2 id="settings-app-heading" className="text-sm font-semibold text-cg-primary">GitHub App</h2>
-            <p className="mt-0.5 text-xs text-cg-muted">Installation access for connected repositories</p>
+    <section className="flex flex-col justify-between min-w-0 rounded-xl border border-cg-border bg-cg-surface p-4" aria-labelledby="settings-app-heading">
+      <div>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-2.5">
+            <FaGithub className="h-4 w-4 shrink-0 text-blue-300" aria-hidden="true" />
+            <div>
+              <h2 id="settings-app-heading" className="text-sm font-semibold text-cg-primary">GitHub App</h2>
+              <p className="mt-0.5 text-xs text-cg-muted">Installation & webhook automation</p>
+            </div>
           </div>
+          <button type="button" onClick={handleStartGitHubAppInstall} disabled={startingAppInstall} className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-500 disabled:cursor-wait disabled:opacity-60 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400">
+            {startingAppInstall ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : <ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" />}
+            {startingAppInstall ? 'Opening GitHub…' : installations.length ? 'Manage on GitHub' : 'Install GitHub App'}
+          </button>
         </div>
-        <button type="button" onClick={handleStartGitHubAppInstall} disabled={startingAppInstall} className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-500 disabled:cursor-wait disabled:opacity-60 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400">
-          {startingAppInstall ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : <ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" />}
-          {startingAppInstall ? 'Opening GitHub…' : installations.length ? 'Manage installation' : 'Install GitHub App'}
+
+        {githubAppNotice && <p className="mt-3 rounded-md border border-amber-400/20 bg-amber-400/5 px-3 py-2 text-xs text-amber-100" role="status">{githubAppNotice}</p>}
+
+        {loadingInstallations ? (
+          <p className="mt-3 flex items-center gap-2 text-xs text-cg-muted" role="status">
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-300" aria-hidden="true" /> Checking linked installations…
+          </p>
+        ) : installationError ? (
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-red-400/20 bg-red-400/5 px-3 py-2" role="alert">
+            <p className="text-xs text-red-100">{installationError}</p>
+            <button type="button" onClick={() => setInstallationRetry(attempt => attempt + 1)} className="inline-flex items-center gap-1 text-xs font-medium text-blue-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400">
+              <RefreshCw className="h-3 w-3" aria-hidden="true" /> Retry
+            </button>
+          </div>
+        ) : (
+          <div className="mt-4 space-y-2 rounded-lg border border-cg-border/70 bg-cg-raised/50 p-3 text-xs">
+            <div className="flex items-center justify-between">
+              <span className="text-cg-muted">Integration Status</span>
+              <span className={'font-medium ' + (installations.length > 0 ? 'text-emerald-300' : 'text-amber-300')}>
+                {installations.length > 0 ? 'Installed & Active' : 'Not Installed'}
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-cg-muted">Linked Account</span>
+              <span className="font-mono text-cg-primary">{selectedInstallation?.accountLogin || (installations[0]?.accountLogin ?? 'None linked')}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-cg-muted">Webhook Events</span>
+              <span className="text-cg-primary">Pull requests (opened, synchronize)</span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-cg-border pt-3">
+        <span className="text-xs text-cg-muted">Repository permissions are configured in Repositories.</span>
+        <button type="button" onClick={() => setActiveView('repositories')} className="inline-flex items-center gap-1 text-xs font-medium text-blue-400 hover:text-blue-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400">
+          Configure in Repositories →
         </button>
       </div>
-      {githubAppNotice && <p className="mt-3 rounded-md border border-amber-400/20 bg-amber-400/5 px-3 py-2 text-xs text-amber-100" role="status">{githubAppNotice}</p>}
-      {loadingInstallations ? <p className="mt-3 flex items-center gap-2 text-xs text-cg-muted" role="status"><Loader2 className="h-3.5 w-3.5 animate-spin text-blue-300" aria-hidden="true" /> Checking linked installations…</p> : installationError ? <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-red-400/20 bg-red-400/5 px-3 py-2" role="alert"><p className="text-xs text-red-100">{installationError}</p><button type="button" onClick={() => setInstallationRetry(attempt => attempt + 1)} className="inline-flex items-center gap-1 text-xs font-medium text-blue-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"><RefreshCw className="h-3 w-3" aria-hidden="true" /> Retry</button></div> : installations.length === 0 ? <p className="mt-3 text-xs text-cg-muted">No installation is linked to this CodeGuard account.</p> : <ul className="mt-3 divide-y divide-cg-border border-y border-cg-border">
-        {installations.map(installation => <li key={installation.installationId} className="flex flex-wrap items-center justify-between gap-2 py-2 text-xs">
-          <span className="min-w-0 truncate text-cg-primary">{installation.accountLogin}{installation.accountName ? ' · ' + installation.accountName : ''}</span>
-          <span className={'shrink-0 font-medium ' + (installation.status === 'active' ? 'text-emerald-300' : 'text-amber-300')}>{installation.status}</span>
-        </li>)}
-      </ul>}
-      {selectedInstallation && !installationError && <p className="mt-2 text-xs text-cg-muted">Selected for repository browsing: {selectedInstallation.accountLogin}</p>}
-      <button type="button" onClick={() => setActiveView('repositories')} className="mt-3 rounded-md border border-cg-border px-3 py-1.5 text-xs font-medium text-cg-primary hover:bg-cg-raised focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400">Manage repositories</button>
+    </section>
+
+    <section className="min-w-0 rounded-xl border border-cg-border bg-cg-surface p-4 lg:col-span-2" aria-labelledby="settings-engine-heading">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 id="settings-engine-heading" className="text-sm font-semibold text-cg-primary">CodeGuard Review Engine</h2>
+          <p className="mt-0.5 text-xs text-cg-muted">Analysis pipeline and automated review configuration</p>
+        </div>
+        <button type="button" onClick={() => setActiveView('repositories')} className="inline-flex items-center gap-1.5 rounded-md border border-cg-border px-3 py-1.5 text-xs font-medium text-cg-primary hover:bg-cg-raised focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400">
+          Manage Repositories
+        </button>
+      </div>
+      <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="rounded-lg border border-cg-border/70 bg-cg-raised/50 p-3">
+          <p className="text-[11px] font-medium text-cg-muted">AI Review Model</p>
+          <p className="mt-1 font-mono text-xs font-semibold text-cg-primary">openai/gpt-oss-20b</p>
+          <p className="mt-0.5 text-[10px] text-cg-muted">Groq LPU Inference</p>
+        </div>
+        <div className="rounded-lg border border-cg-border/70 bg-cg-raised/50 p-3">
+          <p className="text-[11px] font-medium text-cg-muted">Trigger Conditions</p>
+          <p className="mt-1 text-xs font-semibold text-cg-primary">opened, synchronize</p>
+          <p className="mt-0.5 text-[10px] text-cg-muted">GitHub webhook events</p>
+        </div>
+        <div className="rounded-lg border border-cg-border/70 bg-cg-raised/50 p-3">
+          <p className="text-[11px] font-medium text-cg-muted">Review Delivery</p>
+          <p className="mt-1 text-xs font-semibold text-cg-primary">Grouped Inline Comments</p>
+          <p className="mt-0.5 text-[10px] text-cg-muted">GitHub Pull Request Review API</p>
+        </div>
+        <div className="rounded-lg border border-cg-border/70 bg-cg-raised/50 p-3">
+          <p className="text-[11px] font-medium text-cg-muted">Queue Processing</p>
+          <p className="mt-1 text-xs font-semibold text-cg-primary">BullMQ + Upstash Redis</p>
+          <p className="mt-0.5 text-[10px] text-cg-muted">Automatic deduplication & retry</p>
+        </div>
+      </div>
     </section>
   </div>
 </section><section aria-label="Pull request review workspace" hidden={activeView !== 'review-details'} className="min-w-0 space-y-5">              {!selectedReview ? <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-6 sm:p-8">                  <h1 className="mt-2 text-lg font-semibold text-white">Review not found</h1>                  <p className="mt-2 text-sm leading-relaxed text-slate-400">This review is no longer present in the selected repository’s loaded history.</p>                  <button type="button" onClick={returnFromReviewDetails} className="mt-4 rounded-lg border border-slate-700 px-3 py-2 text-xs font-medium text-slate-200 hover:bg-slate-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-400">                    Back to {reviewDetailsReturnView === 'dashboard' ? 'Dashboard' : 'Pull Requests'}                  </button>                </div> : <>                  <header className="space-y-3 border-b border-cg-border pb-4" aria-labelledby="review-workspace-heading">
