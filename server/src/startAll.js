@@ -41,9 +41,20 @@ const beginShutdown = (signal, code, reason) => {
 };
 
 for (const spec of childProcesses) {
-  const child = spawn(process.execPath, [fileURLToPath(spec.entry)], { stdio: 'inherit' });
+  const child = spawn(process.execPath, [fileURLToPath(spec.entry)], {
+    stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
+  });
   const entry = { process: child, closed: false };
   children.set(spec.name, entry);
+
+  child.on('message', (message) => {
+    if (spec.name === 'Worker' && message?.type === 'WORKER_STATUS') {
+      const apiEntry = children.get('API');
+      if (apiEntry && !apiEntry.closed && typeof apiEntry.process.send === 'function') {
+        apiEntry.process.send(message);
+      }
+    }
+  });
 
   child.once('error', (error) => {
     beginShutdown(
@@ -55,6 +66,12 @@ for (const spec of childProcesses) {
 
   child.once('close', (code, signal) => {
     entry.closed = true;
+    if (spec.name === 'Worker') {
+      const apiEntry = children.get('API');
+      if (apiEntry && !apiEntry.closed && typeof apiEntry.process.send === 'function') {
+        apiEntry.process.send({ type: 'WORKER_STATUS', status: 'closed' });
+      }
+    }
     if (!shuttingDown) {
       const result = signal ? `signal ${signal}` : `exit code ${code}`;
       beginShutdown('SIGTERM', 1, `${spec.name} process exited unexpectedly (${result}).`);

@@ -15,13 +15,22 @@ const [
   { default: connectDB },
   { default: mongoose },
   { redisConnection, pingRedis },
+  { createWorkerReadinessTracker, setWorkerStatus },
 ] = await Promise.all([
   import('./config/db.js'),
   import('mongoose'),
   import('./config/redis.js'),
+  import('./services/backendReadiness.js'),
 ]);
 
 let reviewWorker;
+
+const notifyWorkerStatus = (status) => {
+  setWorkerStatus(status);
+  if (typeof process.send === 'function') {
+    process.send({ type: 'WORKER_STATUS', status });
+  }
+};
 
 const start = async () => {
   await connectDB();
@@ -29,13 +38,20 @@ const start = async () => {
 
   const { startReviewWorker } = await import('./workers/reviewWorker.js');
   reviewWorker = startReviewWorker();
+  createWorkerReadinessTracker(reviewWorker);
+
+  reviewWorker.on('closed', () => notifyWorkerStatus('closed'));
+  reviewWorker.on('error', () => notifyWorkerStatus('error'));
+
   await reviewWorker.waitUntilReady();
+  notifyWorkerStatus('ready');
   console.log('Review worker is ready.');
 
   let shuttingDown = false;
   const shutdown = async (signal) => {
     if (shuttingDown) return;
     shuttingDown = true;
+    notifyWorkerStatus('closed');
     console.log(`Received ${signal}; closing review worker.`);
     try {
       await reviewWorker.close();

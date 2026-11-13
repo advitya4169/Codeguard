@@ -1,14 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isBackendReady } from './backendReadiness.js';
+import { isBackendReady, setWorkerStatus } from './backendReadiness.js';
 
 const readyDependencies = () => ({
   mongoReadyState: 1,
   pingRedis: async () => 'PONG',
-  reviewQueue: { getWorkers: async () => [{ db: '0' }] },
+  workerStatus: 'ready',
 });
 
-test('backend is ready when MongoDB, Redis, and a review worker are ready', async () => {
+test('backend is ready when MongoDB, Redis, and worker are ready', async () => {
   assert.equal(await isBackendReady(readyDependencies()), true);
 });
 
@@ -24,20 +24,38 @@ test('backend is not ready when Redis is unavailable', async () => {
   assert.equal(await isBackendReady(dependencies), false);
 });
 
-test('backend is not ready when no review worker is registered', async () => {
+test('backend is not ready when worker is not initialized', async () => {
   const dependencies = readyDependencies();
-  dependencies.reviewQueue.getWorkers = async () => [];
+  dependencies.workerStatus = 'uninitialized';
   assert.equal(await isBackendReady(dependencies), false);
 });
 
-test('backend is not ready when worker discovery fails', async () => {
+test('backend is ready when BullMQ worker is successfully running', async () => {
   const dependencies = readyDependencies();
-  dependencies.reviewQueue.getWorkers = async () => { throw new Error('Redis command failed'); };
-  assert.equal(await isBackendReady(dependencies), false);
+  delete dependencies.workerStatus;
+  dependencies.worker = { isRunning: () => true };
+  assert.equal(await isBackendReady(dependencies), true);
 });
 
-test('backend is not ready when a worker is connected to a different Redis database', async () => {
+test('backend is not ready when worker is closed or unavailable', async () => {
   const dependencies = readyDependencies();
-  dependencies.redisDb = 14;
+  dependencies.workerStatus = 'closed';
   assert.equal(await isBackendReady(dependencies), false);
+
+  const errorDependencies = readyDependencies();
+  errorDependencies.workerStatus = 'error';
+  assert.equal(await isBackendReady(errorDependencies), false);
+
+  const closedWorkerDependencies = readyDependencies();
+  delete closedWorkerDependencies.workerStatus;
+  closedWorkerDependencies.worker = { isRunning: () => false };
+  assert.equal(await isBackendReady(closedWorkerDependencies), false);
+});
+
+test('Upstash-compatible: operates without CLIENT LIST or reviewQueue inspection', async () => {
+  // Confirm that even when reviewQueue throws an Upstash-like CLIENT command error,
+  // readiness relies strictly on MongoDB, Redis PING, and the worker signal without throwing.
+  const dependencies = readyDependencies();
+  setWorkerStatus('ready');
+  assert.equal(await isBackendReady(dependencies), true);
 });

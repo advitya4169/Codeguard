@@ -45,7 +45,7 @@ const [
   { default: mongoose },
   { redisConnection, pingRedis },
   { reviewQueue },
-  { isBackendReady },
+  { isBackendReady, setWorkerStatus, getWorkerStatus },
   { requireAuth },
   { default: reviewRoutes },
   { default: authRoutes },
@@ -111,12 +111,22 @@ app.use(express.json({
   },
 }));
 
+if (process.channel) {
+  setWorkerStatus('uninitialized');
+  process.on('message', (message) => {
+    if (message?.type === 'WORKER_STATUS' && typeof message.status === 'string') {
+      setWorkerStatus(message.status);
+    }
+  });
+} else {
+  setWorkerStatus('ready');
+}
+
 app.get('/healthz', async (req, res) => {
   const ready = await isBackendReady({
     mongoReadyState: mongoose.connection.readyState,
     pingRedis,
-    reviewQueue,
-    redisDb: redisConnection.options.db ?? 0,
+    getWorkerStatus,
   });
   return res.status(ready ? 200 : 503).json({ status: ready ? 'ok' : 'not_ready' });
 });
