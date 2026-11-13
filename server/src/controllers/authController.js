@@ -5,10 +5,14 @@ const getFrontendUrl = () => (process.env.FRONTEND_URL || 'http://localhost:5173
 
 // Redirect user to GitHub login
 export const githubLogin = (req, res) => {
-  const githubAuthUrl =
-    `https://github.com/login/oauth/authorize?client_id=${process.env.GITHUB_CLIENT_ID}&scope=repo,read:user`;
+  const githubAuthUrl = new URL('https://github.com/login/oauth/authorize');
+  githubAuthUrl.searchParams.set('client_id', process.env.GITHUB_CLIENT_ID);
+  githubAuthUrl.searchParams.set('scope', 'repo,read:user');
+  if (process.env.GITHUB_OAUTH_CALLBACK_URL?.trim()) {
+    githubAuthUrl.searchParams.set('redirect_uri', process.env.GITHUB_OAUTH_CALLBACK_URL.trim());
+  }
 
-  res.redirect(githubAuthUrl);
+  res.redirect(githubAuthUrl.toString());
 };
 
 // Handle GitHub callback
@@ -36,6 +40,9 @@ export const githubCallback = async (req, res) => {
           client_id: process.env.GITHUB_CLIENT_ID,
           client_secret: process.env.GITHUB_CLIENT_SECRET,
           code,
+          ...(process.env.GITHUB_OAUTH_CALLBACK_URL?.trim()
+            ? { redirect_uri: process.env.GITHUB_OAUTH_CALLBACK_URL.trim() }
+            : {}),
         }),
       }
     );

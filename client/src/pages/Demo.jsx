@@ -111,7 +111,7 @@ const MD_COMPONENTS = {
     <h3 className="text-slate-200 text-sm font-medium mt-4 mb-1.5">{children}</h3>
   ),
   h4: ({ children }) => (
-    <h4 className="text-slate-300 text-xs font-semibold uppercase tracking-wider mt-3 mb-1">{children}</h4>
+    <h4 className="text-slate-300 text-xs font-semibold mt-3 mb-1">{children}</h4>
   ),
 
   // ── Body text ─────────────────────────────────────────────────────────────
@@ -211,7 +211,7 @@ const MD_COMPONENTS = {
     <tr className="transition-colors hover:bg-slate-800/30">{children}</tr>
   ),
   th: ({ children }) => (
-    <th className="px-4 py-2.5 text-left text-xs font-semibold text-slate-300 uppercase tracking-wider whitespace-nowrap">
+    <th className="px-4 py-2.5 text-left text-xs font-semibold text-slate-300 whitespace-nowrap">
       {children}
     </th>
   ),
@@ -326,7 +326,7 @@ export default function Demo() {
         <div className="max-w-6xl mx-auto px-6 flex items-center justify-between h-14">
           <Link
             to="/"
-            className="flex items-center gap-2.5 text-white font-semibold hover:text-indigo-300 transition-colors"
+            className="flex items-center gap-2.5 rounded text-white font-semibold hover:text-indigo-300 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
             aria-label="CodeGuard home"
           >
             <Code2 className="h-5 w-5 text-indigo-400" aria-hidden="true" />
@@ -336,7 +336,7 @@ export default function Demo() {
             <span className="text-sm text-indigo-400 font-medium">Demo</span>
             <Link
               to="/login"
-              className="flex items-center gap-2 text-sm bg-indigo-600 hover:bg-indigo-500 text-white font-medium px-4 py-1.5 rounded-md transition-colors"
+              className="flex items-center gap-2 text-sm bg-indigo-600 hover:bg-indigo-500 text-white font-medium px-4 py-1.5 rounded-md transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
             >
               <FaGithub className="h-4 w-4" aria-hidden="true" />
               Sign in
@@ -351,7 +351,7 @@ export default function Demo() {
         <div className="mb-8">
           <div className="flex items-center gap-2.5 mb-4">
             <FlaskConical className="h-5 w-5 text-indigo-400" aria-hidden="true" />
-            <h1 className="text-2xl font-bold text-white tracking-tight">
+            <h1 className="text-2xl font-bold text-white">
               Live Code Review Demo
             </h1>
           </div>
@@ -364,7 +364,7 @@ export default function Demo() {
 
         {/* ── Example snippet selector ────────────────────────────────────── */}
         <div className="mb-3">
-          <p className="text-xs font-medium text-slate-500 uppercase tracking-wider mb-2">
+          <p className="text-xs font-medium text-cg-muted mb-2">
             Load an example
           </p>
           <div className="flex flex-wrap gap-2" role="group" aria-label="Example code snippets">
@@ -401,8 +401,8 @@ export default function Demo() {
           >
             {/* Editor chrome */}
             <div className="flex items-center gap-2 px-4 py-2 bg-slate-950/60 border-b border-slate-800">
-              <Terminal className="h-3.5 w-3.5 text-slate-500" aria-hidden="true" />
-              <span className="text-xs font-mono text-slate-500">code to review</span>
+              <Terminal className="h-3.5 w-3.5 text-cg-muted" aria-hidden="true" />
+              <span className="text-xs font-mono text-cg-muted">code to review</span>
             </div>
             <textarea
               id="code-input"
@@ -430,7 +430,7 @@ export default function Demo() {
                   ? 'text-red-400'
                   : charCount > MAX_CHARS * 0.9
                   ? 'text-amber-400'
-                  : 'text-slate-600'
+                  : 'text-cg-muted'
               }`}
             >
               {charCount.toLocaleString()} / {MAX_CHARS.toLocaleString()} characters
@@ -449,7 +449,7 @@ export default function Demo() {
             type="button"
             onClick={handleAnalyze}
             disabled={!canSubmit}
-            className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 disabled:text-slate-500 disabled:cursor-not-allowed text-white font-medium text-sm px-5 py-2.5 rounded-md transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-900"
+            className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 disabled:text-cg-muted disabled:cursor-not-allowed text-white font-medium text-sm px-5 py-2.5 rounded-md transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-900"
             aria-busy={status === 'loading'}
           >
             {status === 'loading' ? (
@@ -485,7 +485,7 @@ export default function Demo() {
             <Loader2 className="h-8 w-8 animate-spin text-indigo-500" aria-hidden="true" />
             <div className="text-center">
               <p className="text-sm font-medium text-slate-300">Analysing your code…</p>
-              <p className="text-xs text-slate-500 mt-1">
+              <p className="text-xs text-cg-muted mt-1">
                 Fetching a Groq review — this usually takes 5–15 seconds.
               </p>
             </div>
@@ -510,7 +510,7 @@ export default function Demo() {
                   type="button"
                   onClick={handleAnalyze}
                   disabled={!canSubmit}
-                  className="mt-4 text-xs text-indigo-400 hover:text-indigo-300 disabled:text-slate-600 transition-colors underline underline-offset-2 focus:outline-none focus-visible:ring-1 focus-visible:ring-indigo-500 rounded"
+                  className="mt-4 text-xs text-indigo-400 hover:text-indigo-300 disabled:text-cg-muted transition-colors underline underline-offset-2 focus:outline-none focus-visible:ring-1 focus-visible:ring-indigo-500 rounded"
                 >
                   Try again
                 </button>
@@ -532,7 +532,7 @@ export default function Demo() {
                   Review complete
                 </h2>
               </div>
-              <span className="text-xs font-mono text-slate-500">
+              <span className="text-xs font-mono text-cg-muted">
                 via Groq · openai/gpt-oss-20b
               </span>
             </div>
@@ -548,8 +548,8 @@ export default function Demo() {
             </div>
 
             {/* Disclaimer */}
-            <p className="mt-4 text-xs text-slate-600 leading-relaxed">
-              <span className="text-slate-500 font-medium">Note:</span> AI findings
+            <p className="mt-4 text-xs text-cg-muted leading-relaxed">
+              <span className="text-cg-muted font-medium">Note:</span> AI findings
               may be incomplete or incorrect. Always verify suggestions before applying
               them to production code.
             </p>
@@ -558,9 +558,9 @@ export default function Demo() {
 
         {/* ── Idle state hint ─────────────────────────────────────────────── */}
         {status === 'idle' && (
-          <p className="text-xs text-slate-600 text-center py-4">
+          <p className="text-xs text-cg-muted text-center py-4">
             Select an example above or paste your own code, then click{' '}
-            <span className="text-slate-500">Analyze Code</span>.
+            <span className="text-cg-muted">Analyze Code</span>.
           </p>
         )}
 
@@ -568,7 +568,7 @@ export default function Demo() {
         <div className="mt-12 pt-8 border-t border-slate-800/60">
           <Link
             to="/"
-            className="inline-flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-300 transition-colors"
+            className="inline-flex items-center gap-1.5 rounded text-sm text-cg-muted hover:text-slate-300 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
           >
             <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
             Back to home
@@ -580,11 +580,11 @@ export default function Demo() {
       {/* ── Footer ────────────────────────────────────────────────────────── */}
       <footer className="border-t border-slate-800 mt-8" role="contentinfo">
         <div className="max-w-6xl mx-auto px-6 py-8 flex items-center justify-between flex-wrap gap-4">
-          <div className="flex items-center gap-2 text-sm text-slate-500">
+          <div className="flex items-center gap-2 text-sm text-cg-muted">
             <Code2 className="h-4 w-4 text-indigo-400/50" aria-hidden="true" />
             CodeGuard
           </div>
-          <p className="text-xs text-slate-700 font-mono">
+          <p className="text-xs text-cg-muted font-mono">
             React · Node.js · MongoDB · BullMQ · Groq AI · GitHub OAuth
           </p>
         </div>

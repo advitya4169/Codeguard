@@ -5,10 +5,18 @@ import dotenv from "dotenv";
 
 import { redisConnection } from "../config/redis.js";
 import { REVIEW_QUEUE_NAME } from "../config/queueNames.js";
-import { getPRDiff, postPRComment } from '../services/githubService.js';
+import {
+  createPRReview,
+  getPRDiff,
+  getPRHeadSha,
+  listPRComments,
+  listPRReviews,
+  postPRComment,
+} from '../services/githubService.js';
 import { getInstallationAccessToken } from '../services/githubAppService.js';
 import { cleanDiff } from "../analyzers/staticAnalyzer.js";
-import { validateFindingsAgainstDiff } from "../analyzers/diffFindingValidator.js";
+import { createFindingDiffContextExtractor, validateFindingsForReview } from "../analyzers/diffFindingValidator.js";
+import { createGitHubReviewPublisher } from '../services/githubReviewPublisher.js';
 
 import ReviewJob from "../models/ReviewJob.js";
 import Finding from "../models/Finding.js";
@@ -26,6 +34,10 @@ const groq = new Groq({
 });
 
 const MODEL = "openai/gpt-oss-20b";
+// The configured model has a 131,072-token context window. Keep the diff below
+// this conservative UTF-8 byte budget to reserve context for the prompt and
+// the 8,192-token completion allowance without silently trimming review input.
+export const MAX_REVIEW_DIFF_BYTES = 96_000;
 
 const allowedCategories = [
   "bug",
@@ -64,6 +76,7 @@ Return exactly one JSON object in this format:
 {
   "findings": [
     {
+      "title": "SQL injection in search query",
       "category": "bug",
       "severity": "high",
       "filePath": "src/example.js",
@@ -89,7 +102,7 @@ ${diff}
       {
         role: "system",
         content:
-          "You are an expert code reviewer. Review only evidence present in the supplied diff. Return one valid JSON object with a findings array. Each finding must include category, severity, exact diff filePath, positive new-side diff lineNumber, explanation, and suggestedFix. Start explanation with Evidence: `exact short code excerpt from the cited line` — then explain how that code causes the issue. Do not invent or speculate; reject claims contradicted by the diff. Do not claim syntax errors, undefined variables, incomplete implementations, or filename conflicts without direct evidence. Assess test/fixture code in its actual context and do not imply production impact without evidence. Omit findings without a reliable location. Return only JSON.",
+          "You are an expert code reviewer. Review only evidence present in the supplied diff. Return one valid JSON object with a findings array. Each finding should include a concise title of at most 8 words, category, severity, exact diff filePath, positive new-side diff lineNumber, explanation, and suggestedFix. Start explanation with Evidence: `exact short code excerpt from the cited line` — then explain how that code causes the issue. Do not invent or speculate; reject claims contradicted by the diff. Do not claim syntax errors, undefined variables, incomplete implementations, or filename conflicts without direct evidence. Assess test/fixture code in its actual context and do not imply production impact without evidence. Omit findings without a reliable location. Return only JSON.",
       },
       {
         role: "user",
@@ -132,6 +145,19 @@ ${diff}
     );
   }
 
+  return parseReviewResponse(responseText);
+}
+
+const normalizeFindingTitle = (title) => {
+  if (typeof title !== "string") return undefined;
+  const normalized = title.trim();
+  if (!normalized || normalized.length > 120 || normalized.split(/\s+/).length > 8) {
+    return undefined;
+  }
+  return normalized;
+};
+
+export const parseReviewResponse = (responseText) => {
   let result;
 
   try {
@@ -145,7 +171,8 @@ ${diff}
     throw new Error('AI response must contain a "findings" array');
   }
 
-  // Validate the output before storing it in MongoDB.
+  // Validate the established finding fields. Titles are optional metadata and
+  // malformed titles are omitted so the UI can use its fallback.
   for (const finding of result.findings) {
     if (
       !finding ||
@@ -161,8 +188,16 @@ ${diff}
     }
   }
 
-  return result.findings;
-}
+  return result.findings.map((finding) => {
+    const title = normalizeFindingTitle(finding.title);
+    if (!title) {
+      const findingWithoutTitle = { ...finding };
+      delete findingWithoutTitle.title;
+      return findingWithoutTitle;
+    }
+    return { ...finding, title };
+  });
+};
 
 export const createReviewProcessor = ({
   ReviewJobModel = ReviewJob,
@@ -170,11 +205,22 @@ export const createReviewProcessor = ({
   RepositoryModel = Repository,
   InstallationModel = Installation,
   getPRDiffFn = getPRDiff,
+  getPRHeadShaFn = getPRHeadSha,
+  listPRReviewsFn = listPRReviews,
+  listPRCommentsFn = listPRComments,
+  createPRReviewFn = createPRReview,
   postPRCommentFn = postPRComment,
   getInstallationAccessTokenFn = getInstallationAccessToken,
   analyzeDiffFn = analyzeDiff,
   logger = console,
 } = {}) => async (job) => {
+  const publishGitHubReview = createGitHubReviewPublisher({
+    getPRHeadShaFn,
+    listPRReviewsFn,
+    listPRCommentsFn,
+    createPRReviewFn,
+    postPRCommentFn,
+  });
   const data = job?.data;
   if (!data || typeof data !== "object" || Array.isArray(data)) {
     throw new Error("Review job metadata is invalid.");
@@ -281,6 +327,12 @@ export const createReviewProcessor = ({
         $set: {
           status: "processing",
           summary: "Review is processing.",
+          githubPublicationStatus: "pending",
+        },
+        $unset: {
+          githubPublicationId: 1,
+          githubPublicationUrl: 1,
+          githubPublishedAt: 1,
         },
       };
 
@@ -325,6 +377,17 @@ export const createReviewProcessor = ({
         authToken = tokenResult.token;
       }
 
+      // A queued job may have waited long enough for a newer PR revision to arrive.
+      const initialHeadSha = await getPRHeadShaFn(repoFullName, prNumber, authToken);
+      if (initialHeadSha !== commitSha) {
+        reviewJob.status = "stale";
+        reviewJob.githubPublicationStatus = "stale";
+        reviewJob.summary = "Skipped because the pull request has a newer commit. A newer review will handle that revision.";
+        await reviewJob.save();
+        logger.log('[review] skipped stale queued commit', { repositoryId: String(repo._id), prNumber, commitSha });
+        return { status: "stale" };
+      }
+
       await job.updateProgress(10);
 
       // 3. Fetch the PR diff from GitHub.
@@ -346,11 +409,24 @@ export const createReviewProcessor = ({
         throw error;
       }
 
+      // The PR can advance while its diff is being fetched. Avoid spending AI time
+      // on a diff that no longer corresponds to the queued commit.
+      const diffHeadSha = await getPRHeadShaFn(repoFullName, prNumber, authToken);
+      if (diffHeadSha !== commitSha) {
+        reviewJob.status = "stale";
+        reviewJob.githubPublicationStatus = "stale";
+        reviewJob.summary = "Skipped because the pull request changed while its diff was loading. A newer review will handle that revision.";
+        await reviewJob.save();
+        logger.log('[review] skipped commit that changed during diff fetch', { repositoryId: String(repo._id), prNumber, commitSha });
+        return { status: "stale" };
+      }
+
       // 4. Remove excluded files.
       const cleanCodeDiff = cleanDiff(rawDiff);
 
       if (!cleanCodeDiff.trim()) {
         reviewJob.status = "completed";
+        reviewJob.githubPublicationStatus = "not_needed";
         reviewJob.summary =
           "No reviewable code changed (only ignored files).";
 
@@ -362,26 +438,40 @@ export const createReviewProcessor = ({
         return { status: "skipped" };
       }
 
+      const diffSizeBytes = Buffer.byteLength(cleanCodeDiff, "utf8");
+      if (diffSizeBytes > MAX_REVIEW_DIFF_BYTES) {
+        throw new Error(
+          `This pull request diff is too large for a reliable AI review (maximum ${MAX_REVIEW_DIFF_BYTES} UTF-8 bytes). Reduce the diff or split the changes into smaller pull requests, then retry.`
+        );
+      }
+
       await job.updateProgress(40);
 
       // 5. Analyze the diff using Groq.
       console.log("- Requesting Groq AI analysis...");
 
       const aiFindings = await analyzeDiffFn(cleanCodeDiff);
-      const findings = validateFindingsAgainstDiff(aiFindings, cleanCodeDiff);
+      const { commentableFindings, unanchoredFindings } = validateFindingsForReview(aiFindings, cleanCodeDiff);
+      const findings = [...commentableFindings, ...unanchoredFindings];
+      const getFindingDiffContext = createFindingDiffContextExtractor(cleanCodeDiff);
 
       await job.updateProgress(80);
 
       // 6. Prepare MongoDB finding documents.
-      const findingDocs = findings.map((finding) => ({
-        reviewJobId: reviewJob._id,
-        category: finding.category,
-        severity: finding.severity,
-        filePath: finding.filePath,
-        lineNumber: finding.lineNumber || undefined,
-        explanation: finding.explanation,
-        suggestedFix: finding.suggestedFix,
-      }));
+      const findingDocs = findings.map((finding) => {
+        const diffContext = getFindingDiffContext(finding);
+        return {
+          reviewJobId: reviewJob._id,
+          title: finding.title,
+          category: finding.category,
+          severity: finding.severity,
+          filePath: finding.filePath,
+          lineNumber: finding.lineNumber ?? undefined,
+          explanation: finding.explanation,
+          suggestedFix: finding.suggestedFix,
+          ...(diffContext.length ? { diffContext } : {}),
+        };
+      });
 
       // Replace the prior attempt's findings, including when the new result is empty.
       await FindingModel.deleteMany({ reviewJobId: reviewJob._id });
@@ -397,6 +487,7 @@ export const createReviewProcessor = ({
       await job.updateProgress(90);
       reviewJob.status = "completed";
       reviewJob.summary = `Processed ${findings.length} findings.`;
+      reviewJob.githubPublicationStatus = findings.length ? "pending" : "not_needed";
       await reviewJob.save();
       analysisCompleted = true;
       completedFindingsCount = findings.length;
@@ -413,40 +504,51 @@ export const createReviewProcessor = ({
       }
 
       if (findingDocs.length > 0) {
-        console.log('- Formatting findings for GitHub...');
-
-        let markdownReport = `## 🛡️ CodeGuard Review\n\nGroq analyzed this PR and found **${findingDocs.length}** issues:\n\n`;
-        markdownReport += `| Severity | Category | File | Line | Finding | Suggested Fix |\n`;
-        markdownReport += `| :--- | :--- | :--- | :--- | :--- | :--- |\n`;
-
-        findingDocs.forEach(f => {
-          const severityBadge = f.severity === 'critical' ? '🔴' : f.severity === 'high' ? '🟠' : f.severity === 'medium' ? '🟡' : '🔵';
-
-          // Sanitize outputs to prevent Markdown table formatting from breaking
-          const safeExplanation = f.explanation ? f.explanation.replace(/\|/g, '-').replace(/\n/g, ' ') : 'N/A';
-          const safeFix = f.suggestedFix ? f.suggestedFix.replace(/\|/g, '-').replace(/\n/g, ' ') : 'N/A';
-
-          markdownReport += `| ${severityBadge} ${f.severity.toUpperCase()} | ${f.category} | \`${f.filePath}\` | \`${f.lineNumber || 'N/A'}\` | ${safeExplanation} | ${safeFix} |\n`;
-        });
-
-        markdownReport += `\n*Processed by CodeGuard (Model: openai/gpt-oss-20b)*`;
-
+        const inlineCount = commentableFindings.length;
+        const unanchoredCount = unanchoredFindings.length;
+        let publication;
         try {
-          await postPRCommentFn(repoFullName, prNumber, authToken, markdownReport);
-          logger.log('✅ Posted review comment to GitHub PR!');
+          publication = await publishGitHubReview({
+            repositoryId: String(repo._id),
+            repoFullName,
+            prNumber,
+            commitSha,
+            accessToken: authToken,
+            commentableFindings,
+            unanchoredFindings,
+          });
         } catch (error) {
-          // Comment delivery is optional; the analyzed findings are already persisted.
-          logger.error(
-            `GitHub PR comment failed for ${repoFullName}#${prNumber}; review results remain saved.`,
-            {
-              status: Number.isInteger(error?.status) ? error.status : undefined,
-              errorType: error?.name || 'Error',
-              endpoint: error?.endpoint,
-              responseMessage: error?.responseMessage,
-              acceptedPermissions: error?.acceptedPermissions,
-            }
-          );
+          publication = { status: error?.ambiguous ? 'uncertain' : 'failed', error };
         }
+
+        if (publication.status === 'stale') {
+          reviewJob.githubPublicationStatus = 'stale';
+        } else if (publication.status === 'published' || publication.status === 'duplicate') {
+          reviewJob.githubPublicationStatus = publication.status;
+          reviewJob.githubPublicationId = Number.isSafeInteger(publication.id) ? publication.id : undefined;
+          reviewJob.githubPublicationUrl = typeof publication.url === 'string' ? publication.url : undefined;
+          if (publication.status === 'published') reviewJob.githubPublishedAt = new Date();
+        } else {
+          reviewJob.githubPublicationStatus = publication.status;
+        }
+        try {
+          await reviewJob.save();
+        } catch (error) {
+          logger.error('[github-review] publication metadata could not be persisted', { errorType: error?.name || 'Error' });
+        }
+
+        logger.log('[github-review] publication outcome', {
+          repositoryId: String(repo._id),
+          prNumber,
+          commitSha,
+          findingsConsidered: findingDocs.length,
+          inlineComments: publication.inlineCount ?? 0,
+          unanchoredFindings: unanchoredCount,
+          status: publication.status,
+          responseStatus: publication.responseStatus ?? publication.error?.status,
+          endpoint: publication.error?.endpoint,
+          acceptedPermissions: publication.error?.acceptedPermissions,
+        });
       }
 
       try {

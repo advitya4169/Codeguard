@@ -45,6 +45,7 @@ const [
   { default: mongoose },
   { redisConnection, pingRedis },
   { reviewQueue },
+  { isBackendReady },
   { requireAuth },
   { default: reviewRoutes },
   { default: authRoutes },
@@ -58,6 +59,7 @@ const [
   import('mongoose'),
   import('./config/redis.js'),
   import('./config/queue.js'),
+  import('./services/backendReadiness.js'),
   import('./middleware/authMiddleware.js'),
   import('./routes/reviewRoutes.js'),
   import('./routes/authRoutes.js'),
@@ -110,16 +112,13 @@ app.use(express.json({
 }));
 
 app.get('/healthz', async (req, res) => {
-  if (mongoose.connection.readyState !== 1) {
-    return res.status(503).json({ status: 'not_ready' });
-  }
-
-  try {
-    await pingRedis(2_000);
-    return res.status(200).json({ status: 'ok' });
-  } catch {
-    return res.status(503).json({ status: 'not_ready' });
-  }
+  const ready = await isBackendReady({
+    mongoReadyState: mongoose.connection.readyState,
+    pingRedis,
+    reviewQueue,
+    redisDb: redisConnection.options.db ?? 0,
+  });
+  return res.status(ready ? 200 : 503).json({ status: ready ? 'ok' : 'not_ready' });
 });
 
 app.use('/api/review', reviewRoutes);
@@ -166,6 +165,7 @@ const start = async () => {
 start().catch(async (error) => {
   console.error(`Backend startup failed: ${error.message}`);
   try {
+    await reviewQueue.close();
     if (redisConnection.status !== 'end') redisConnection.disconnect();
     await mongoose.disconnect();
   } catch {

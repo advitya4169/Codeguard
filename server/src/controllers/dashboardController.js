@@ -2,12 +2,16 @@ import Repository from '../models/Repository.js';
 import ReviewJob from '../models/ReviewJob.js';
 import Finding from '../models/Finding.js';
 
-export const getRepositoryReviews = async (req, res) => {
+export const createGetRepositoryReviewsHandler = ({
+  RepositoryModel = Repository,
+  ReviewJobModel = ReviewJob,
+  FindingModel = Finding,
+} = {}) => async (req, res) => {
   try {
     const { githubRepoId } = req.params;
 
     // Scope the lookup to the authenticated user's repository records.
-    const repository = await Repository.findOne({
+    const repository = await RepositoryModel.findOne({
       githubRepoId,
       userId: req.user.userId,
       isConnected: true,
@@ -19,14 +23,14 @@ export const getRepositoryReviews = async (req, res) => {
     }
 
     // 2. Fetch all review jobs for this repository (newest first)
-    const reviews = await ReviewJob.find({ repositoryId: repository._id })
+    const reviews = await ReviewJobModel.find({ repositoryId: repository._id })
       .sort({ createdAt: -1 })
       .lean();
 
     // 3. Attach the specific findings to each review job
     const reviewsWithFindings = await Promise.all(
       reviews.map(async (review) => {
-        const findings = await Finding.find({ reviewJobId: review._id }).lean();
+        const findings = await FindingModel.find({ reviewJobId: review._id }).lean();
         return { ...review, findings };
       })
     );
@@ -37,3 +41,5 @@ export const getRepositoryReviews = async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch review history' });
   }
 };
+
+export const getRepositoryReviews = createGetRepositoryReviewsHandler();

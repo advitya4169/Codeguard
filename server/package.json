@@ -6,8 +6,10 @@
   "scripts": {
     "start": "node src/server.js",
     "start:all": "node src/startAll.js",
-    "dev": "node --watch src/server.js",
+    "dev": "node --env-file-if-exists=.env.local --watch src/server.js",
     "worker": "node src/worker.js",
+    "worker:dev": "node --env-file-if-exists=.env.local src/worker.js",
+    "start:all:dev": "node --env-file-if-exists=.env.local src/startAll.js",
     "test": "node --test"
   },
   "engines": {

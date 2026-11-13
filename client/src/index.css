@@ -1,3 +1,19 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  --cg-background: #0b0c0e;
+  --cg-surface: #111316;
+  --cg-raised: #17191d;
+  --cg-border: #292c31;
+  --cg-text-primary: #f4f4f5;
+  --cg-text-muted: #a1a1aa;
+  --cg-accent: #60a5fa;
+  --cg-severity-critical: #f87171;
+  --cg-severity-high: #fb923c;
+  --cg-severity-medium: #fbbf24;
+  --cg-severity-low: #38bdf8;
+  --cg-severity-suggestion: #a1a1aa;
+}

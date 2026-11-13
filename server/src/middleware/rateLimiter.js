@@ -43,7 +43,7 @@ export function demoRateLimiter(req, res, next) {
 
 // Periodically remove entries where all timestamps have expired,
 // so the Map does not grow without bound over a long server lifetime.
-setInterval(() => {
+const cleanupTimer = setInterval(() => {
   const cutoff = Date.now() - WINDOW_MS;
   for (const [ip, timestamps] of ipTimestamps.entries()) {
     const fresh = timestamps.filter((t) => t > cutoff);
@@ -54,3 +54,4 @@ setInterval(() => {
     }
   }
 }, WINDOW_MS);
+cleanupTimer.unref();

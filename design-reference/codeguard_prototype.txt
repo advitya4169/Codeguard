@@ -1,0 +1,933 @@
+import React, { useState, useEffect } from 'react';
+import { 
+  GitPullRequest, 
+  LayoutDashboard, 
+  Activity, 
+  Settings, 
+  Users, 
+  AlertTriangle, 
+  AlertCircle, 
+  Info, 
+  CheckCircle2,
+  ChevronRight,
+  GitCommit,
+  GitBranch,
+  Copy,
+  Check,
+  Search,
+  ArrowLeft,
+  TerminalSquare,
+  Shield,
+  Calendar,
+  Clock,
+  AlertOctagon,
+  Server,
+  Zap
+} from 'lucide-react';
+import {
+  ComposedChart,
+  Bar,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip as RechartsTooltip,
+  ResponsiveContainer
+} from 'recharts';
+
+// --- Mock Data ---
+
+const mockStats = {
+  prsReviewed: 124,
+  findingsLogged: 892,
+  activeRepos: 3
+};
+
+const mockPRs = [
+  {
+    id: 'pr-142',
+    number: 142,
+    title: 'Add authentication middleware',
+    repo: 'api-gateway',
+    sourceBranch: 'feat/auth',
+    targetBranch: 'main',
+    author: 'alice-dev',
+    status: 'reviewed',
+    findingsCount: 3,
+    lastActivity: '10m ago'
+  },
+  {
+    id: 'pr-89',
+    number: 89,
+    title: 'Fix race condition in job queue',
+    repo: 'worker-service',
+    sourceBranch: 'fix/queue',
+    targetBranch: 'main',
+    author: 'bob-backend',
+    status: 'reviewed',
+    findingsCount: 1,
+    lastActivity: '2h ago'
+  },
+  {
+    id: 'pr-210',
+    number: 210,
+    title: 'Update dependencies',
+    repo: 'frontend-app',
+    sourceBranch: 'chore/deps',
+    targetBranch: 'main',
+    author: 'dependabot',
+    status: 'clean',
+    findingsCount: 0,
+    lastActivity: '5h ago'
+  }
+];
+
+const mockFindings = {
+  'pr-142': [
+    {
+      id: 'f-1',
+      title: 'SQL Injection in user lookup',
+      severity: 'high',
+      category: 'Security',
+      file: 'src/auth/db.ts',
+      line: 42,
+      codeContext: [
+        { num: 39, type: 'context', code: "export async function getUser(username: string) {" },
+        { num: 40, type: 'context', code: "  const db = await getDbConnection();" },
+        { num: 41, type: 'context', code: "  // Fetch user from DB" },
+        { num: 42, type: 'removed', code: "  const query = `SELECT * FROM users WHERE username = '${username}'`;", isTarget: true },
+        { num: 43, type: 'context', code: "  return await db.execute(query);" },
+        { num: 44, type: 'context', code: "}" }
+      ],
+      analysis: "Direct string interpolation of the `username` parameter into the SQL query string makes this vulnerable to SQL injection. An attacker could input a payload like `' OR '1'='1` to bypass the authentication check or extract unauthorized data.",
+      suggestedFix: "  const query = 'SELECT * FROM users WHERE username = $1';\n  return await db.execute(query, [username]);"
+    },
+    {
+      id: 'f-2',
+      title: 'Unescaped HTML in error response',
+      severity: 'medium',
+      category: 'XSS',
+      file: 'src/auth/routes.ts',
+      line: 18,
+      codeContext: [
+        { num: 16, type: 'context', code: "  if (!user) {" },
+        { num: 17, type: 'context', code: "    const msg = `User ${req.body.username} not found`;" },
+        { num: 18, type: 'removed', code: "    res.status(404).send(`<html><body><h1>Error</h1><p>${msg}</p></body></html>`);", isTarget: true },
+        { num: 19, type: 'context', code: "    return;" },
+        { num: 20, type: 'context', code: "  }" }
+      ],
+      analysis: "The username provided in the request body is reflected back to the user in an HTML response without sanitization. This leads to Reflected Cross-Site Scripting (XSS).",
+      suggestedFix: "    // Use a sanitization library or return JSON instead of HTML\n    res.status(404).json({ error: 'User not found', username: req.body.username });"
+    },
+    {
+      id: 'f-3',
+      title: 'Missing rate limiting',
+      severity: 'low',
+      category: 'Reliability',
+      file: 'src/auth/routes.ts',
+      line: 12,
+      codeContext: [
+        { num: 10, type: 'context', code: "const router = Router();" },
+        { num: 11, type: 'context', code: "" },
+        { num: 12, type: 'context', code: "router.post('/login', async (req, res) => {", isTarget: true },
+        { num: 13, type: 'context', code: "  const { username, password } = req.body;" },
+        { num: 14, type: 'context', code: "  const user = await getUser(username);" }
+      ],
+      analysis: "The authentication endpoint lacks rate limiting. Attackers could perform brute-force or credential stuffing attacks against this route without being blocked.",
+      suggestedFix: "import rateLimit from 'express-rate-limit';\n\nconst loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5 });\nrouter.post('/login', loginLimiter, async (req, res) => {"
+    }
+  ],
+  'pr-89': [
+    {
+      id: 'f-4',
+      title: 'Missing await on async job dispatch',
+      severity: 'high',
+      category: 'Concurrency',
+      file: 'src/queue/dispatcher.ts',
+      line: 22,
+      codeContext: [
+        { num: 20, type: 'context', code: "export async function processBatch(items: any[]) {" },
+        { num: 21, type: 'context', code: "  for (const item of items) {" },
+        { num: 22, type: 'removed', code: "    queue.add('process', item);", isTarget: true },
+        { num: 22, type: 'added', code: "    await queue.add('process', item);" },
+        { num: 23, type: 'context', code: "  }" },
+        { num: 24, type: 'context', code: "  console.log('Batch queued');" },
+        { num: 25, type: 'context', code: "}" }
+      ],
+      analysis: "The `queue.add()` function returns a Promise. By not awaiting it or handling errors, job dispatch failures will be silently swallowed, leading to potential data loss if Redis becomes unavailable.",
+      suggestedFix: "    await queue.add('process', item);"
+    }
+  ]
+};
+
+const analyticsData = {
+  overview: {
+    totalPrs: 842,
+    totalFindings: 2184,
+    criticalHigh: 136,
+    avgFindings: 2.6,
+    successRate: 99.8
+  },
+  timeSeries: [
+    { date: 'Oct 01', prs: 22, findings: 65 },
+    { date: 'Oct 03', prs: 28, findings: 81 },
+    { date: 'Oct 05', prs: 35, findings: 92 },
+    { date: 'Oct 07', prs: 19, findings: 42 },
+    { date: 'Oct 09', prs: 42, findings: 115 },
+    { date: 'Oct 11', prs: 38, findings: 94 },
+    { date: 'Oct 13', prs: 25, findings: 68 },
+    { date: 'Oct 15', prs: 45, findings: 122 },
+    { date: 'Oct 17', prs: 31, findings: 88 },
+    { date: 'Oct 19', prs: 29, findings: 75 }
+  ],
+  severity: [
+    { level: 'Critical', count: 24, percent: 1, color: 'bg-red-500', text: 'text-red-500' },
+    { level: 'High', count: 112, percent: 5, color: 'bg-orange-500', text: 'text-orange-500' },
+    { level: 'Medium', count: 856, percent: 39, color: 'bg-amber-500', text: 'text-amber-500' },
+    { level: 'Low', count: 1192, percent: 55, color: 'bg-blue-500', text: 'text-blue-500' }
+  ],
+  categories: [
+    { name: 'Reliability', count: 742, icon: <Shield size={14} /> },
+    { name: 'Maintainability', count: 685, icon: <TerminalSquare size={14} /> },
+    { name: 'Security', count: 412, icon: <AlertOctagon size={14} /> },
+    { name: 'Performance', count: 215, icon: <Zap size={14} /> },
+    { name: 'Best Practices', count: 130, icon: <CheckCircle2 size={14} /> }
+  ],
+  repos: [
+    { name: 'core-api', prs: 312, findings: 890, critHigh: 62 },
+    { name: 'web-client', prs: 284, findings: 645, critHigh: 38 },
+    { name: 'auth-service', prs: 156, findings: 412, critHigh: 28 },
+    { name: 'payment-gateway', prs: 90, findings: 237, critHigh: 8 }
+  ],
+  files: [
+    { path: 'src/auth/jwt.ts', repo: 'auth-service', count: 34, type: 'Security' },
+    { path: 'api/handlers/users.go', repo: 'core-api', count: 28, type: 'Reliability' },
+    { path: 'components/DataTable.tsx', repo: 'web-client', count: 22, type: 'Performance' },
+    { path: 'pkg/db/postgres.go', repo: 'core-api', count: 19, type: 'Maintainability' },
+    { path: 'src/utils/crypto.ts', repo: 'auth-service', count: 15, type: 'Security' }
+  ]
+};
+
+// --- UI Components ---
+
+const Badge = ({ children, variant = 'default', className = '' }) => {
+  const variants = {
+    default: 'bg-zinc-800 text-zinc-300 border border-zinc-700',
+    high: 'bg-red-500/10 text-red-400 border border-red-500/20',
+    medium: 'bg-yellow-500/10 text-yellow-400 border border-yellow-500/20',
+    low: 'bg-blue-500/10 text-blue-400 border border-blue-500/20',
+    success: 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20',
+  };
+  return (
+    <span className={`px-2 py-0.5 rounded-md text-xs font-medium inline-flex items-center gap-1.5 ${variants[variant]} ${className}`}>
+      {children}
+    </span>
+  );
+};
+
+const CodeBlock = ({ code, language = 'typescript' }) => {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(code);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <div className="relative group rounded-md overflow-hidden border border-zinc-800 bg-zinc-950">
+      <div className="flex items-center justify-between px-4 py-2 bg-zinc-900 border-b border-zinc-800">
+        <span className="text-xs text-zinc-400 font-mono">{language}</span>
+        <button 
+          onClick={handleCopy}
+          className="text-zinc-400 hover:text-zinc-100 transition-colors"
+          title="Copy code"
+        >
+          {copied ? <Check size={14} className="text-emerald-400" /> : <Copy size={14} />}
+        </button>
+      </div>
+      <pre className="p-4 text-[13px] font-mono leading-relaxed text-zinc-300 overflow-x-auto whitespace-pre">
+        <code>{code}</code>
+      </pre>
+    </div>
+  );
+};
+
+// --- Main Application ---
+
+export default function App() {
+  const [currentView, setCurrentView] = useState('dashboard');
+  const [selectedPR, setSelectedPR] = useState(null);
+  const [selectedFinding, setSelectedFinding] = useState(null);
+
+  // Navigation Handlers
+  const navigateTo = (view) => {
+    setCurrentView(view);
+    if (view !== 'workspace') {
+      setSelectedPR(null);
+      setSelectedFinding(null);
+    }
+  };
+
+  const openWorkspace = (pr) => {
+    setSelectedPR(pr);
+    setCurrentView('workspace');
+    // Auto-select first finding if available
+    const prFindings = mockFindings[pr.id];
+    if (prFindings && prFindings.length > 0) {
+      setSelectedFinding(prFindings[0]);
+    } else {
+      setSelectedFinding(null);
+    }
+  };
+
+  // --- Views ---
+
+  const renderDashboard = () => (
+    <div className="p-8 max-w-6xl mx-auto animate-in fade-in duration-300">
+      <h1 className="text-2xl font-semibold text-zinc-100 tracking-tight mb-6">Overview</h1>
+      
+      {/* Stats Row */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+        {[
+          { label: 'PRs Reviewed', value: mockStats.prsReviewed, icon: <GitPullRequest size={16} /> },
+          { label: 'Findings Logged', value: mockStats.findingsLogged, icon: <TerminalSquare size={16} /> },
+          { label: 'Active Repositories', value: mockStats.activeRepos, icon: <GitBranch size={16} /> },
+        ].map((stat, i) => (
+          <div key={i} className="p-4 rounded-lg bg-zinc-900 border border-zinc-800 flex flex-col gap-2">
+            <div className="flex items-center gap-2 text-zinc-400 text-sm">
+              {stat.icon}
+              <span>{stat.label}</span>
+            </div>
+            <span className="text-2xl font-semibold text-zinc-100">{stat.value}</span>
+          </div>
+        ))}
+      </div>
+
+      {/* Recent PRs */}
+      <div>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-sm font-medium text-zinc-100">Recent Activity</h2>
+          <button onClick={() => navigateTo('prs')} className="text-sm text-blue-400 hover:text-blue-300">View all</button>
+        </div>
+        <div className="bg-zinc-900 border border-zinc-800 rounded-lg overflow-hidden">
+          <table className="w-full text-left border-collapse">
+            <thead>
+              <tr className="border-b border-zinc-800 text-xs text-zinc-400 bg-zinc-900/50">
+                <th className="px-4 py-3 font-medium">Pull Request</th>
+                <th className="px-4 py-3 font-medium">Repository</th>
+                <th className="px-4 py-3 font-medium">Status</th>
+                <th className="px-4 py-3 font-medium">Findings</th>
+              </tr>
+            </thead>
+            <tbody>
+              {mockPRs.map(pr => (
+                <tr 
+                  key={pr.id} 
+                  onClick={() => openWorkspace(pr)}
+                  className="border-b border-zinc-800/50 last:border-0 hover:bg-zinc-800/30 cursor-pointer transition-colors"
+                >
+                  <td className="px-4 py-3">
+                    <div className="flex flex-col">
+                      <span className="text-sm text-zinc-200 font-medium">{pr.title}</span>
+                      <span className="text-xs text-zinc-500 font-mono">#{pr.number} by {pr.author}</span>
+                    </div>
+                  </td>
+                  <td className="px-4 py-3 text-sm text-zinc-300">{pr.repo}</td>
+                  <td className="px-4 py-3">
+                    {pr.status === 'clean' ? (
+                      <Badge variant="success"><CheckCircle2 size={12}/> Clean</Badge>
+                    ) : (
+                      <Badge variant="default"><Activity size={12}/> Reviewed</Badge>
+                    )}
+                  </td>
+                  <td className="px-4 py-3 text-sm">
+                    {pr.findingsCount > 0 ? (
+                      <span className="text-red-400 font-medium">{pr.findingsCount}</span>
+                    ) : (
+                      <span className="text-zinc-500">0</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderPRs = () => (
+    <div className="p-8 max-w-6xl mx-auto animate-in fade-in duration-300">
+      <div className="flex items-center justify-between mb-6">
+        <h1 className="text-2xl font-semibold text-zinc-100 tracking-tight">Pull Requests</h1>
+        <div className="relative">
+          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
+          <input 
+            type="text" 
+            placeholder="Search PRs..." 
+            className="pl-9 pr-4 py-1.5 text-sm bg-zinc-900 border border-zinc-800 rounded-md text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/50 w-64 transition-all"
+          />
+        </div>
+      </div>
+
+      <div className="bg-zinc-900 border border-zinc-800 rounded-lg overflow-hidden shadow-sm shadow-black/20">
+        <table className="w-full text-left border-collapse">
+          <thead>
+            <tr className="border-b border-zinc-800 text-xs text-zinc-400 uppercase tracking-wider bg-zinc-900/80">
+              <th className="px-4 py-3 font-medium">PR / Title</th>
+              <th className="px-4 py-3 font-medium">Repository</th>
+              <th className="px-4 py-3 font-medium">Branch</th>
+              <th className="px-4 py-3 font-medium">Status</th>
+              <th className="px-4 py-3 font-medium text-right">Activity</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-zinc-800/50">
+            {mockPRs.map(pr => (
+              <tr 
+                key={pr.id} 
+                onClick={() => openWorkspace(pr)}
+                className="hover:bg-zinc-800/40 cursor-pointer transition-colors group"
+              >
+                <td className="px-4 py-4">
+                  <div className="flex items-start gap-3">
+                    <GitPullRequest size={16} className={`mt-0.5 ${pr.findingsCount > 0 ? 'text-blue-400' : 'text-emerald-500'}`} />
+                    <div className="flex flex-col gap-1">
+                      <span className="text-sm font-medium text-zinc-200 group-hover:text-blue-400 transition-colors">{pr.title}</span>
+                      <span className="text-xs text-zinc-500 font-mono">#{pr.number} · {pr.author}</span>
+                    </div>
+                  </div>
+                </td>
+                <td className="px-4 py-4">
+                  <span className="inline-flex items-center gap-1.5 text-sm text-zinc-300">
+                    <TerminalSquare size={14} className="text-zinc-500" />
+                    {pr.repo}
+                  </span>
+                </td>
+                <td className="px-4 py-4">
+                  <div className="flex items-center gap-1.5 text-xs font-mono text-zinc-400">
+                    <GitBranch size={12} />
+                    <span className="max-w-[100px] truncate" title={pr.sourceBranch}>{pr.sourceBranch}</span>
+                    <ChevronRight size={12} className="text-zinc-600" />
+                    <span className="max-w-[100px] truncate" title={pr.targetBranch}>{pr.targetBranch}</span>
+                  </div>
+                </td>
+                <td className="px-4 py-4">
+                  <div className="flex items-center gap-2">
+                    {pr.findingsCount > 0 ? (
+                      <Badge variant="high" className="bg-transparent border-none px-0">
+                        <AlertTriangle size={14} /> {pr.findingsCount} findings
+                      </Badge>
+                    ) : (
+                      <Badge variant="success" className="bg-transparent border-none px-0">
+                        <CheckCircle2 size={14} /> Clean
+                      </Badge>
+                    )}
+                  </div>
+                </td>
+                <td className="px-4 py-4 text-right text-xs text-zinc-500">
+                  {pr.lastActivity}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+
+  const renderWorkspace = () => {
+    if (!selectedPR) return null;
+    const findings = mockFindings[selectedPR.id] || [];
+
+    return (
+      <div className="h-full flex flex-col overflow-hidden animate-in slide-in-from-right-4 duration-300">
+        {/* Workspace Header */}
+        <header className="h-14 shrink-0 border-b border-zinc-800 bg-zinc-900/50 backdrop-blur px-4 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <button 
+              onClick={() => navigateTo('prs')}
+              className="p-1.5 rounded-md text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-all"
+            >
+              <ArrowLeft size={18} />
+            </button>
+            <div className="h-4 w-px bg-zinc-700"></div>
+            <div className="flex items-center gap-2 text-sm">
+              <span className="text-zinc-400">{selectedPR.repo}</span>
+              <span className="text-zinc-600">/</span>
+              <span className="font-medium text-zinc-200">{selectedPR.title}</span>
+              <span className="text-xs text-zinc-500 font-mono ml-2">#{selectedPR.number}</span>
+            </div>
+          </div>
+          <div className="flex items-center gap-4 text-xs">
+             <div className="flex items-center gap-1.5 text-zinc-400 font-mono bg-zinc-950 px-2 py-1 rounded border border-zinc-800">
+               <GitCommit size={14} />
+               1a2b3c4
+             </div>
+             <button className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-md font-medium transition-colors shadow-sm shadow-blue-900/20">
+               Sync PR
+             </button>
+          </div>
+        </header>
+
+        {/* Split View */}
+        <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
+          {/* Left Panel: Findings List */}
+          <div className="w-full lg:w-[320px] shrink-0 border-b lg:border-b-0 lg:border-r border-zinc-800 bg-zinc-900/30 flex flex-col h-[40%] lg:h-auto">
+            <div className="p-4 border-b border-zinc-800 flex items-center justify-between shrink-0">
+              <h3 className="text-sm font-medium text-zinc-200">Review Findings</h3>
+              <Badge>{findings.length}</Badge>
+            </div>
+            <div className="flex-1 overflow-y-auto">
+              {findings.length === 0 ? (
+                <div className="p-8 text-center flex flex-col items-center justify-center h-full text-zinc-500">
+                  <CheckCircle2 size={32} className="mb-3 text-emerald-500/50" />
+                  <p className="text-sm">No issues found.</p>
+                  <p className="text-xs mt-1">This pull request looks clean.</p>
+                </div>
+              ) : (
+                <div className="p-2 space-y-1">
+                  {findings.map((finding) => (
+                    <button
+                      key={finding.id}
+                      onClick={() => setSelectedFinding(finding)}
+                      className={`w-full text-left p-3 rounded-lg border transition-all ${
+                        selectedFinding?.id === finding.id 
+                          ? 'bg-zinc-800 border-zinc-700 border-l-2 border-l-blue-500 shadow-sm' 
+                          : 'border-transparent hover:bg-zinc-800/50 hover:border-zinc-800/50'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between mb-2">
+                        <span className="text-sm font-medium text-zinc-200 line-clamp-2 pr-2">{finding.title}</span>
+                        <Badge variant={finding.severity} className="shrink-0">
+                          {finding.severity === 'high' && <AlertTriangle size={10} />}
+                          {finding.severity === 'medium' && <AlertCircle size={10} />}
+                          {finding.severity === 'low' && <Info size={10} />}
+                          <span className="capitalize">{finding.severity}</span>
+                        </Badge>
+                      </div>
+                      <div className="flex items-center gap-1.5 text-xs text-zinc-500 font-mono truncate">
+                        {finding.file}:{finding.line}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Right Panel: Diff and Analysis */}
+          <div className="flex-1 bg-zinc-950 overflow-y-auto h-[60%] lg:h-auto">
+            {selectedFinding ? (
+              <div className="p-6 max-w-4xl mx-auto space-y-6">
+                
+                {/* File Header */}
+                <div className="flex items-center gap-2 text-sm text-zinc-400 font-mono bg-zinc-900 border border-zinc-800 p-2.5 rounded-t-lg border-b-0">
+                  <TerminalSquare size={16} />
+                  {selectedFinding.file}
+                </div>
+
+                {/* Code Diff Simulation */}
+                <div className="bg-zinc-950 border border-zinc-800 rounded-b-lg rounded-t-none overflow-hidden font-mono text-[13px] leading-relaxed mt-0 border-t-0 shadow-sm">
+                  {selectedFinding.codeContext.map((line, idx) => {
+                    let lineBg = 'hover:bg-zinc-900/50';
+                    let lineText = 'text-zinc-300';
+                    let prefix = ' ';
+                    
+                    if (line.type === 'added') {
+                      lineBg = 'bg-green-500/10';
+                      lineText = 'text-green-400';
+                      prefix = '+';
+                    } else if (line.type === 'removed') {
+                      lineBg = 'bg-red-500/10';
+                      lineText = 'text-red-400';
+                      prefix = '-';
+                    }
+                    
+                    // Highlight target line with left border
+                    const isTargetHighlight = line.isTarget ? 'relative before:absolute before:left-0 before:top-0 before:bottom-0 before:w-0.5 before:bg-blue-500' : '';
+
+                    return (
+                      <div 
+                        key={idx} 
+                        className={`flex w-full ${lineBg} ${lineText} ${isTargetHighlight}`}
+                      >
+                        <div className="w-12 shrink-0 border-r border-zinc-800 py-0.5 pr-3 text-right text-zinc-600 select-none bg-zinc-900/30">
+                          {line.num}
+                        </div>
+                        <div className="w-6 shrink-0 py-0.5 text-center select-none opacity-50">
+                          {prefix}
+                        </div>
+                        <div className="pl-2 py-0.5 whitespace-pre overflow-x-auto w-full">
+                          {line.code}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* AI Analysis Card */}
+                <div className="mt-8 rounded-lg border border-zinc-800 bg-zinc-900 overflow-hidden shadow-sm">
+                  <div className="px-5 py-3 border-b border-zinc-800 bg-zinc-900/50 flex items-center gap-2">
+                    <div className="h-5 w-5 rounded bg-blue-500/20 flex items-center justify-center shrink-0">
+                      <span className="text-blue-400 text-xs font-bold">AI</span>
+                    </div>
+                    <h3 className="text-sm font-medium text-zinc-100">CodeGuard Analysis</h3>
+                  </div>
+                  <div className="p-5 text-sm text-zinc-300 leading-relaxed">
+                    <p>{selectedFinding.analysis}</p>
+                  </div>
+                </div>
+
+                {/* Suggested Fix */}
+                {selectedFinding.suggestedFix && (
+                  <div className="mt-6">
+                    <h4 className="text-sm font-medium text-zinc-200 mb-3 flex items-center gap-2">
+                      <CheckCircle2 size={16} className="text-emerald-500" />
+                      Suggested Fix
+                    </h4>
+                    <CodeBlock code={selectedFinding.suggestedFix} />
+                  </div>
+                )}
+                
+                <div className="pb-12"></div> {/* Bottom padding */}
+              </div>
+            ) : (
+              <div className="h-full flex items-center justify-center text-zinc-500">
+                {findings.length > 0 ? 'Select a finding to view details.' : 'No findings for this PR.'}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderAnalytics = () => (
+    <div className="p-8 max-w-6xl mx-auto animate-in fade-in duration-300 space-y-8 pb-20">
+      
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold text-zinc-100 tracking-tight flex items-center gap-3">
+            Analytics
+            <Badge variant="default" className="font-mono text-[10px] uppercase tracking-wider bg-zinc-800/50">Illustrative Mock Data</Badge>
+          </h1>
+          <p className="text-sm text-zinc-400 mt-1">Repository code quality and AI review performance.</p>
+        </div>
+        <button className="flex items-center gap-2 text-sm text-zinc-300 bg-zinc-900 border border-zinc-800 hover:bg-zinc-800 px-3 py-1.5 rounded-md transition-colors">
+          <Calendar size={14} className="text-zinc-500" />
+          Last 30 Days
+        </button>
+      </div>
+
+      {/* Overview Metrics */}
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+         <div className="p-4 border border-zinc-800/80 bg-zinc-900/50 rounded-lg flex flex-col gap-1">
+            <span className="text-xs font-medium text-zinc-500 uppercase tracking-wider">Total PRs</span>
+            <span className="text-2xl font-mono text-zinc-100">{analyticsData.overview.totalPrs}</span>
+         </div>
+         <div className="p-4 border border-zinc-800/80 bg-zinc-900/50 rounded-lg flex flex-col gap-1">
+            <span className="text-xs font-medium text-zinc-500 uppercase tracking-wider">Total Findings</span>
+            <span className="text-2xl font-mono text-zinc-100">{analyticsData.overview.totalFindings}</span>
+         </div>
+         <div className="p-4 border border-zinc-800/80 bg-zinc-900/50 rounded-lg flex flex-col gap-1">
+            <span className="text-xs font-medium text-zinc-500 uppercase tracking-wider">Critical & High</span>
+            <div className="flex items-baseline gap-2">
+              <span className="text-2xl font-mono text-orange-400">{analyticsData.overview.criticalHigh}</span>
+              <span className="text-xs font-mono text-zinc-500">issues</span>
+            </div>
+         </div>
+         <div className="p-4 border border-zinc-800/80 bg-zinc-900/50 rounded-lg flex flex-col gap-1">
+            <span className="text-xs font-medium text-zinc-500 uppercase tracking-wider">Avg Findings/PR</span>
+            <span className="text-2xl font-mono text-zinc-100">{analyticsData.overview.avgFindings}</span>
+         </div>
+         <div className="p-4 border border-zinc-800/80 bg-zinc-900/50 rounded-lg flex flex-col gap-1">
+            <span className="text-xs font-medium text-zinc-500 uppercase tracking-wider">Review Success</span>
+            <span className="text-2xl font-mono text-emerald-400">{analyticsData.overview.successRate}%</span>
+         </div>
+      </div>
+
+      {/* Main Chart */}
+      <div className="border border-zinc-800/80 bg-zinc-900/30 rounded-lg p-5">
+        <h3 className="text-sm font-medium text-zinc-200 mb-6">Review Activity & Findings Detected</h3>
+        <div className="h-64 w-full">
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart data={analyticsData.timeSeries} margin={{ top: 5, right: 0, left: -20, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
+              <XAxis dataKey="date" stroke="#52525b" fontSize={11} tickLine={false} axisLine={false} dy={10} />
+              <YAxis yAxisId="left" stroke="#52525b" fontSize={11} tickLine={false} axisLine={false} />
+              <YAxis yAxisId="right" orientation="right" stroke="#52525b" fontSize={11} tickLine={false} axisLine={false} />
+              <RechartsTooltip 
+                contentStyle={{ backgroundColor: '#18181b', borderColor: '#27272a', borderRadius: '6px', fontSize: '12px', border: '1px solid #27272a' }}
+                itemStyle={{ color: '#e4e4e7', fontFamily: 'monospace' }}
+                labelStyle={{ color: '#a1a1aa', marginBottom: '4px' }}
+                cursor={{ fill: '#27272a', opacity: 0.4 }}
+              />
+              <Bar yAxisId="left" dataKey="prs" name="PRs Reviewed" fill="#3f3f46" radius={[2, 2, 0, 0]} barSize={24} />
+              <Line yAxisId="right" type="monotone" dataKey="findings" name="Findings Detected" stroke="#3b82f6" strokeWidth={2} dot={{ r: 3, fill: '#3b82f6', strokeWidth: 0 }} activeDot={{ r: 5 }} />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      {/* Breakdown Section */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        
+        {/* Severity */}
+        <div className="border border-zinc-800/80 bg-zinc-900/30 rounded-lg p-5">
+          <h3 className="text-sm font-medium text-zinc-200 mb-5">Findings by Severity</h3>
+          <div className="space-y-4">
+            {analyticsData.severity.map((item) => (
+              <div key={item.level}>
+                <div className="flex justify-between text-xs mb-1.5">
+                  <span className={`font-medium ${item.text}`}>{item.level}</span>
+                  <div className="flex items-center gap-3">
+                    <span className="text-zinc-500 font-mono">{item.count}</span>
+                    <span className="text-zinc-300 font-mono w-8 text-right">{item.percent}%</span>
+                  </div>
+                </div>
+                <div className="h-1.5 bg-zinc-950 rounded-full overflow-hidden border border-zinc-800/50">
+                  <div className={`h-full ${item.color} rounded-full`} style={{ width: `${item.percent}%` }}></div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Categories */}
+        <div className="border border-zinc-800/80 bg-zinc-900/30 rounded-lg p-5">
+          <h3 className="text-sm font-medium text-zinc-200 mb-5">Top Issue Categories</h3>
+          <div className="space-y-1">
+            {analyticsData.categories.map((cat) => (
+              <div key={cat.name} className="flex items-center justify-between p-2 hover:bg-zinc-800/40 rounded-md transition-colors border border-transparent hover:border-zinc-800/50">
+                <div className="flex items-center gap-3 text-sm text-zinc-300">
+                  <span className="text-zinc-500">{cat.icon}</span>
+                  {cat.name}
+                </div>
+                <span className="text-xs font-mono text-zinc-400 bg-zinc-900 px-2 py-1 rounded border border-zinc-800">{cat.count}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Tables Section */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        
+        {/* Repositories */}
+        <div className="border border-zinc-800/80 bg-zinc-900/30 rounded-lg overflow-hidden flex flex-col">
+          <div className="p-4 border-b border-zinc-800/80 bg-zinc-900/50">
+            <h3 className="text-sm font-medium text-zinc-200">Repository Insights</h3>
+          </div>
+          <table className="w-full text-left text-sm whitespace-nowrap">
+            <thead className="bg-zinc-950/50 text-xs text-zinc-500">
+              <tr>
+                <th className="px-4 py-3 font-medium">Repository</th>
+                <th className="px-4 py-3 font-medium text-right">PRs</th>
+                <th className="px-4 py-3 font-medium text-right">Findings</th>
+                <th className="px-4 py-3 font-medium text-right">Crit/High</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-zinc-800/50">
+              {analyticsData.repos.map((repo) => (
+                <tr key={repo.name} className="hover:bg-zinc-800/30">
+                  <td className="px-4 py-3 text-zinc-300 flex items-center gap-2">
+                    <TerminalSquare size={14} className="text-zinc-500" />
+                    {repo.name}
+                  </td>
+                  <td className="px-4 py-3 text-right font-mono text-zinc-400">{repo.prs}</td>
+                  <td className="px-4 py-3 text-right font-mono text-zinc-400">{repo.findings}</td>
+                  <td className="px-4 py-3 text-right font-mono text-orange-400/80">{repo.critHigh}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Files */}
+        <div className="border border-zinc-800/80 bg-zinc-900/30 rounded-lg overflow-hidden flex flex-col">
+          <div className="p-4 border-b border-zinc-800/80 bg-zinc-900/50">
+            <h3 className="text-sm font-medium text-zinc-200">Frequently Flagged Files</h3>
+          </div>
+          <table className="w-full text-left text-sm">
+            <thead className="bg-zinc-950/50 text-xs text-zinc-500">
+              <tr>
+                <th className="px-4 py-3 font-medium">File Path</th>
+                <th className="px-4 py-3 font-medium text-right">Issues</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-zinc-800/50">
+              {analyticsData.files.map((file, idx) => (
+                <tr key={idx} className="hover:bg-zinc-800/30">
+                  <td className="px-4 py-2.5">
+                    <div className="flex flex-col gap-0.5">
+                      <span className="font-mono text-zinc-300 text-[12px] truncate max-w-[280px]" title={file.path}>{file.path}</span>
+                      <span className="text-[10px] text-zinc-500">{file.repo} · {file.type}</span>
+                    </div>
+                  </td>
+                  <td className="px-4 py-2.5 text-right font-mono text-zinc-400">{file.count}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Operational Health Footer */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-4 border-t border-zinc-800/50">
+         <div className="flex items-center gap-3 p-3 bg-zinc-900/20 rounded-lg border border-zinc-800/50">
+           <div className="w-8 h-8 rounded bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-400"><Server size={14} /></div>
+           <div className="flex flex-col">
+             <span className="text-[10px] text-zinc-500 uppercase tracking-wider font-medium">API Uptime</span>
+             <span className="text-sm font-mono text-zinc-200">99.98%</span>
+           </div>
+         </div>
+         <div className="flex items-center gap-3 p-3 bg-zinc-900/20 rounded-lg border border-zinc-800/50">
+           <div className="w-8 h-8 rounded bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400"><CheckCircle2 size={14} /></div>
+           <div className="flex flex-col">
+             <span className="text-[10px] text-zinc-500 uppercase tracking-wider font-medium">GitHub Publish Rate</span>
+             <span className="text-sm font-mono text-zinc-200">99.5%</span>
+           </div>
+         </div>
+         <div className="flex items-center gap-3 p-3 bg-zinc-900/20 rounded-lg border border-zinc-800/50">
+           <div className="w-8 h-8 rounded bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-400"><Clock size={14} /></div>
+           <div className="flex flex-col">
+             <span className="text-[10px] text-zinc-500 uppercase tracking-wider font-medium">P95 Processing</span>
+             <span className="text-sm font-mono text-zinc-200">14.2s</span>
+           </div>
+         </div>
+      </div>
+
+    </div>
+  );
+
+  const renderSettings = () => (
+    <div className="p-8 max-w-4xl mx-auto animate-in fade-in duration-300">
+      <h1 className="text-2xl font-semibold text-zinc-100 tracking-tight mb-6">Settings</h1>
+      
+      <div className="bg-zinc-900 border border-zinc-800 rounded-lg">
+        <div className="p-6 border-b border-zinc-800">
+          <h2 className="text-base font-medium text-zinc-100 mb-1">GitHub Integration</h2>
+          <p className="text-sm text-zinc-400">Manage your connected GitHub account and repositories.</p>
+        </div>
+        <div className="p-6">
+          <div className="flex items-center justify-between p-4 border border-zinc-800 rounded-md bg-zinc-950">
+            <div className="flex items-center gap-4">
+              <div className="h-10 w-10 rounded-full bg-zinc-800 flex items-center justify-center border border-zinc-700">
+                {/* Fallback avatar icon representing github mark */}
+                <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" className="text-zinc-300"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path></svg>
+              </div>
+              <div>
+                <div className="text-sm font-medium text-zinc-200">CodeGuard GitHub App</div>
+                <div className="text-xs text-emerald-400 flex items-center gap-1 mt-0.5">
+                  <div className="w-1.5 h-1.5 rounded-full bg-emerald-500"></div> Active across 3 repositories
+                </div>
+              </div>
+            </div>
+            <button className="text-sm px-3 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 transition-colors border border-zinc-700">
+              Configure
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="flex h-screen bg-zinc-950 text-zinc-300 font-sans selection:bg-blue-500/30">
+      
+      {/* Sidebar Navigation */}
+      <aside className="w-60 border-r border-zinc-800 bg-zinc-900/50 flex flex-col shrink-0">
+        <div className="h-14 flex items-center px-6 border-b border-zinc-800">
+          <div className="flex items-center gap-2 text-zinc-100 font-semibold tracking-wide">
+            <div className="w-6 h-6 rounded bg-blue-600 flex items-center justify-center shadow-inner">
+              <TerminalSquare size={14} className="text-white" />
+            </div>
+            CodeGuard
+          </div>
+        </div>
+
+        <nav className="flex-1 px-3 py-4 space-y-1">
+          <button 
+            onClick={() => navigateTo('dashboard')}
+            className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-all ${currentView === 'dashboard' ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-200'}`}
+          >
+            <LayoutDashboard size={18} />
+            Dashboard
+          </button>
+          <button 
+            onClick={() => navigateTo('prs')}
+            className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-all ${currentView === 'prs' || currentView === 'workspace' ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-200'}`}
+          >
+            <GitPullRequest size={18} />
+            Pull Requests
+          </button>
+          <button 
+            onClick={() => navigateTo('analytics')}
+            className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-all ${currentView === 'analytics' ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-200'}`}
+          >
+            <Activity size={18} />
+            Analytics
+          </button>
+          
+          <div className="pt-4 mt-4 border-t border-zinc-800/50">
+            <div className="px-3 pb-2 text-[10px] font-semibold text-zinc-500 uppercase tracking-wider">Planned</div>
+            
+            <button 
+              disabled
+              className="w-full flex items-center justify-between px-3 py-2 rounded-md text-sm font-medium text-zinc-600 cursor-not-allowed group"
+            >
+              <div className="flex items-center gap-3">
+                <Shield size={18} />
+                Rules
+              </div>
+            </button>
+
+            <button 
+              disabled
+              className="w-full flex items-center justify-between px-3 py-2 rounded-md text-sm font-medium text-zinc-600 cursor-not-allowed group mt-1"
+            >
+              <div className="flex items-center gap-3">
+                <Users size={18} />
+                Team
+              </div>
+            </button>
+            
+            <div className="mt-4 pt-4 border-t border-zinc-800/50">
+              <button 
+                onClick={() => navigateTo('settings')}
+                className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-all ${currentView === 'settings' ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-200'}`}
+              >
+                <Settings size={18} />
+                Settings
+              </button>
+            </div>
+          </div>
+        </nav>
+        
+        <div className="p-4 border-t border-zinc-800">
+           <div className="flex items-center gap-3 px-2">
+             <div className="w-8 h-8 rounded-full bg-zinc-800 flex items-center justify-center text-xs font-medium text-zinc-400 border border-zinc-700">
+               JD
+             </div>
+             <div className="flex flex-col">
+               <span className="text-sm font-medium text-zinc-300">Jane Doe</span>
+               <span className="text-xs text-zinc-500">jane@example.com</span>
+             </div>
+           </div>
+        </div>
+      </aside>
+
+      {/* Main Content Area */}
+      <main className="flex-1 flex flex-col h-screen overflow-hidden bg-[#09090b]">
+        {currentView === 'dashboard' && <div className="flex-1 overflow-y-auto">{renderDashboard()}</div>}
+        {currentView === 'prs' && <div className="flex-1 overflow-y-auto">{renderPRs()}</div>}
+        {currentView === 'workspace' && renderWorkspace()}
+        {currentView === 'analytics' && <div className="flex-1 overflow-y-auto">{renderAnalytics()}</div>}
+        {currentView === 'settings' && <div className="flex-1 overflow-y-auto">{renderSettings()}</div>}
+      </main>
+
+    </div>
+  );
+}

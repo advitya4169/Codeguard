@@ -54,3 +54,33 @@ export const requestReviewRetry = async (repositoryId, reviewId, token, fetchImp
   }
   return data;
 };
+
+export const requestGitHubPublicationRetry = async (repositoryId, reviewId, token, fetchImpl = fetch) => {
+  const response = await fetchImpl(
+    apiUrl(`/api/dashboard/repos/${repositoryId}/reviews/${reviewId}/retry-publication`),
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/json',
+      },
+    },
+  );
+
+  let data = {};
+  try {
+    data = await response.json();
+  } catch {
+    // Surface a safe status-based message below if the response is not JSON.
+  }
+
+  if (!response.ok) {
+    const error = new Error(data.error || `Could not retry GitHub publication (HTTP ${response.status}).`);
+    error.status = response.status;
+    throw error;
+  }
+  if (typeof data.reviewId !== 'string' || typeof data.githubPublicationStatus !== 'string') {
+    throw new Error('The server returned an unexpected publication retry response.');
+  }
+  return data;
+};

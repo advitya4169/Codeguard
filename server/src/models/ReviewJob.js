@@ -6,10 +6,17 @@ const reviewJobSchema = new mongoose.Schema({
   commitSha: { type: String, required: true },
   status: { 
     type: String, 
-    enum: ['queued', 'processing', 'completed', 'failed'], 
+    enum: ['queued', 'processing', 'completed', 'failed', 'stale'],
     default: 'queued' 
   },
   summary: { type: String }, // A general AI summary of the PR
+  githubPublicationStatus: {
+    type: String,
+    enum: ['pending', 'published', 'duplicate', 'stale', 'failed', 'uncertain', 'not_needed'],
+  },
+  githubPublicationId: { type: Number },
+  githubPublicationUrl: { type: String },
+  githubPublishedAt: { type: Date },
 }, { timestamps: true });
 
 // A single persisted review represents one PR head revision in one repository.

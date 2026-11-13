@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>CodeGuard Dashboard Preview</title>
+    <style>
+      html, body { margin: 0; min-height: 100%; background: #090e1b; }
+      #preview-notice { position: sticky; top: 0; z-index: 100; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; min-height: 34px; padding: 6px 12px; border-bottom: 1px solid #4338ca; background: #1e1b4b; color: #e0e7ff; font: 600 11px/1.4 system-ui, sans-serif; text-align: center; }
+      #preview-notice strong { color: #c4b5fd; letter-spacing: .08em; }
+      #preview-request-status { color: #a5b4fc; font-weight: 400; }
+      #preview-root { min-height: calc(100vh - 35px); }
+    </style>
+  </head>
+  <body>
+    <aside id="preview-notice" role="status">
+      <strong>ISOLATED VISUAL PREVIEW</strong>
+      <span>Mock data · API calls intercepted locally · GitHub actions disabled</span>
+      <span id="preview-request-status">Waiting for preview data…</span>
+    </aside>
+    <div id="preview-root"></div>
+    <script type="module" src="./preview.jsx"></script>
+  </body>
+</html>

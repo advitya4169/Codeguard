@@ -136,10 +136,10 @@ function SeverityBadge({ severity }) {
   const { Icon } = cfg;
   return (
     <span
-      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded border text-xs font-semibold font-mono tracking-wider ${cfg.className}`}
+      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded border text-xs font-semibold font-mono ${cfg.className}`}
     >
       <Icon className="h-3 w-3" aria-hidden="true" />
-      {severity.toUpperCase()}
+      {severity.charAt(0).toUpperCase() + severity.slice(1)}
     </span>
   );
 }
@@ -158,7 +158,7 @@ export default function Landing() {
         <div className="max-w-6xl mx-auto px-6 flex items-center justify-between h-14">
           <Link
             to="/"
-            className="flex items-center gap-2.5 text-white font-semibold hover:text-indigo-300 transition-colors"
+            className="flex items-center gap-2.5 rounded text-white font-semibold hover:text-indigo-300 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
             aria-label="CodeGuard home"
           >
             <Code2 className="h-5 w-5 text-indigo-400" aria-hidden="true" />
@@ -168,13 +168,13 @@ export default function Landing() {
           <div className="flex items-center gap-6">
             <Link
               to="/demo"
-              className="text-sm text-slate-400 hover:text-slate-100 transition-colors"
+              className="rounded text-sm text-slate-400 hover:text-slate-100 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
             >
               Demo
             </Link>
             <Link
               to="/login"
-              className="flex items-center gap-2 text-sm bg-indigo-600 hover:bg-indigo-500 text-white font-medium px-4 py-1.5 rounded-md transition-colors"
+              className="flex items-center gap-2 text-sm bg-indigo-600 hover:bg-indigo-500 text-white font-medium px-4 py-1.5 rounded-md transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
             >
               <FaGithub className="h-4 w-4" aria-hidden="true" />
               Sign in
@@ -192,7 +192,7 @@ export default function Landing() {
             GitHub-native pull request analysis
           </div>
 
-          <h1 className="text-5xl sm:text-6xl font-bold text-white tracking-tight leading-tight mb-6">
+          <h1 className="text-5xl sm:text-6xl font-bold text-white leading-tight mb-6">
             AI code review on
             <br className="hidden sm:block" />
             {' '}
@@ -208,14 +208,14 @@ export default function Landing() {
           <div className="flex items-center justify-center gap-4 flex-wrap">
             <Link
               to="/demo"
-              className="flex items-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-100 font-medium px-6 py-3 rounded-md border border-slate-700 transition-colors"
+              className="flex items-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-100 font-medium px-6 py-3 rounded-md border border-slate-700 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
             >
               Explore Live Demo
               <ArrowRight className="h-4 w-4" aria-hidden="true" />
             </Link>
             <Link
               to="/login"
-              className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white font-medium px-6 py-3 rounded-md transition-colors"
+              className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white font-medium px-6 py-3 rounded-md transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
             >
               <FaGithub className="h-4 w-4" aria-hidden="true" />
               Connect GitHub
@@ -230,7 +230,7 @@ export default function Landing() {
         >
           <h2 id="preview-heading" className="sr-only">Sample review output</h2>
 
-          <div className="border border-slate-800 rounded-lg overflow-hidden bg-slate-950 shadow-xl shadow-black/30">
+          <div className="border border-slate-800 rounded-lg overflow-hidden bg-slate-950">
 
             {/* Window chrome */}
             <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800 bg-slate-900/60 flex-wrap gap-2">
@@ -246,8 +246,8 @@ export default function Landing() {
                   <span>
                     Pull Request <span className="font-mono">#47</span>
                   </span>
-                  <span className="font-mono text-slate-700" aria-hidden="true">·</span>
-                  <span className="font-mono text-slate-500">a3f8c12</span>
+                  <span className="font-mono text-cg-muted" aria-hidden="true">·</span>
+                  <span className="font-mono text-cg-muted">a3f8c12</span>
                 </div>
               </div>
               <span
@@ -266,13 +266,13 @@ export default function Landing() {
                   <div className="flex items-start justify-between gap-4 mb-3 flex-wrap">
                     <div className="flex items-center gap-3 flex-wrap">
                       <SeverityBadge severity={finding.severity} />
-                      <span className="text-xs font-mono text-slate-500 uppercase tracking-widest">
+                      <span className="text-xs font-mono text-cg-muted">
                         {finding.category.replace('_', '\u00a0')}
                       </span>
                     </div>
                     <span className="text-xs font-mono text-slate-400 bg-slate-900 px-2.5 py-1 rounded border border-slate-800 whitespace-nowrap">
                       {finding.filePath}
-                      <span className="text-slate-600">:{finding.lineNumber}</span>
+                      <span className="text-cg-muted">:{finding.lineNumber}</span>
                     </span>
                   </div>
 
@@ -281,7 +281,7 @@ export default function Landing() {
                   </p>
 
                   <div className="bg-slate-900 rounded border border-slate-800 overflow-hidden">
-                    <div className="text-xs font-mono text-indigo-300/70 px-3 py-1.5 border-b border-slate-800/60 bg-indigo-500/5 uppercase tracking-wider">
+                    <div className="text-xs font-mono text-indigo-300/70 px-3 py-1.5 border-b border-slate-800/60 bg-indigo-500/5">
                       Suggested fix
                     </div>
                     <pre className="px-4 py-3 text-xs text-emerald-300/90 font-mono overflow-x-auto">
@@ -298,7 +298,7 @@ export default function Landing() {
         <section className="border-t border-slate-800 bg-slate-950/40">
           <div className="max-w-6xl mx-auto px-6 py-20">
             <h2 className="text-2xl font-bold text-white mb-1">How it works</h2>
-            <p className="text-slate-500 text-sm mb-12">
+            <p className="text-cg-muted text-sm mb-12">
               The full review pipeline runs automatically, end to end.
             </p>
 
@@ -327,7 +327,7 @@ export default function Landing() {
         <section className="border-t border-slate-800">
           <div className="max-w-6xl mx-auto px-6 py-20">
             <h2 className="text-2xl font-bold text-white mb-1">Built for production</h2>
-            <p className="text-slate-500 text-sm mb-12">
+            <p className="text-cg-muted text-sm mb-12">
               Every capability listed here is implemented and active.
             </p>
 
@@ -357,7 +357,7 @@ export default function Landing() {
         {/* ── Closing CTA ─────────────────────────────────────────────────────── */}
         <section className="border-t border-slate-800 bg-slate-950/40">
           <div className="max-w-6xl mx-auto px-6 py-24 text-center">
-            <h2 className="text-3xl sm:text-4xl font-bold text-white mb-4 tracking-tight">
+            <h2 className="text-3xl sm:text-4xl font-bold text-white mb-4">
               Stop reviewing blind spots manually.
             </h2>
             <p className="text-slate-400 mb-10 max-w-xl mx-auto text-sm leading-relaxed">
@@ -367,14 +367,14 @@ export default function Landing() {
             <div className="flex items-center justify-center gap-6 flex-wrap">
               <Link
                 to="/login"
-                className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white font-medium px-6 py-3 rounded-md transition-colors"
+                className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white font-medium px-6 py-3 rounded-md transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
               >
                 <FaGithub className="h-4 w-4" aria-hidden="true" />
                 Connect GitHub
               </Link>
               <Link
                 to="/demo"
-                className="text-sm text-slate-400 hover:text-slate-200 transition-colors underline underline-offset-4"
+                className="rounded text-sm text-slate-400 hover:text-slate-200 transition-colors underline underline-offset-4 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
               >
                 Try the demo first
               </Link>
@@ -387,11 +387,11 @@ export default function Landing() {
       {/* ── Footer ──────────────────────────────────────────────────────────── */}
       <footer className="border-t border-slate-800" role="contentinfo">
         <div className="max-w-6xl mx-auto px-6 py-8 flex items-center justify-between flex-wrap gap-4">
-          <div className="flex items-center gap-2 text-sm text-slate-500">
+          <div className="flex items-center gap-2 text-sm text-cg-muted">
             <Code2 className="h-4 w-4 text-indigo-400/50" aria-hidden="true" />
             CodeGuard
           </div>
-          <p className="text-xs text-slate-700 font-mono">
+          <p className="text-xs text-cg-muted font-mono">
             React · Node.js · MongoDB · BullMQ · Groq AI · GitHub OAuth
           </p>
         </div>
