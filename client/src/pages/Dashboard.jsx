@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { ArrowUpRight, BookMarked, ChevronLeft, ChevronRight, Code2, Copy, GitBranch, GitPullRequest, Info, LayoutDashboard, Loader2, LogOut, BarChart3, PanelLeftClose, PanelLeftOpen, RefreshCw, Search, Settings } from 'lucide-react';
+import { ArrowUpRight, BookMarked, Check, ChevronLeft, ChevronRight, Code2, Copy, GitBranch, GitPullRequest, Info, LayoutDashboard, Loader2, LogOut, BarChart3, PanelLeftClose, PanelLeftOpen, RefreshCw, Search, Settings } from 'lucide-react';
 import { FaGithub } from 'react-icons/fa';
 import StatusBadge from '../components/StatusBadge.jsx';
 import { apiUrl } from '../config/api.js';
@@ -463,59 +463,348 @@ function ComparisonGroup({
 }) {
   return <section><div className="mb-2 flex items-center justify-between gap-2"><h4 className="text-xs font-semibold text-slate-200">{title}</h4><span className="rounded-full border border-slate-800 px-2 py-0.5 text-[10px] tabular-nums text-cg-muted">{count}</span></div>{count === 0 ? <p className="text-[11px] text-cg-muted">None</p> : <div className="space-y-2">{children}</div>}</section>;
 }
+const inferLanguageFromPath = (filePath) => {
+  if (typeof filePath !== 'string') return 'javascript';
+  const ext = filePath.split('.').pop()?.toLowerCase();
+  switch (ext) {
+    case 'js':
+    case 'mjs':
+    case 'cjs':
+      return 'javascript';
+    case 'jsx':
+      return 'jsx';
+    case 'ts':
+      return 'typescript';
+    case 'tsx':
+      return 'tsx';
+    case 'py':
+      return 'python';
+    case 'html':
+    case 'htm':
+      return 'html';
+    case 'css':
+      return 'css';
+    case 'json':
+      return 'json';
+    case 'sql':
+      return 'sql';
+    case 'sh':
+    case 'bash':
+      return 'bash';
+    default:
+      return 'javascript';
+  }
+};
+
+const tokenizeCodeLine = (line) => {
+  const tokenRegex = /(\/\/[^\n]*)|("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)|(\b(?:function|return|const|let|var|if|else|for|while|import|export|from|default|class|extends|new|async|await|try|catch|finally|throw|typeof|instanceof|def|elif|pass|in|is|not)\b)|(\b(?:document|window|console|JSON|Math|Promise|Array|Object|String|Number|Boolean|null|undefined|true|false)\b)|(\b[a-zA-Z_$][\w$]*(?=\s*\())|(\b\d+(?:\.\d+)?\b)|([\]{}(),;=+\-*/<>!&|.:[]+)|([^\s\]{}(),;=+\-*/<>!&|.:["]+)/g;
+
+  let match;
+  let lastIndex = 0;
+  const tokens = [];
+
+  while ((match = tokenRegex.exec(line)) !== null) {
+    if (match.index > lastIndex) {
+      tokens.push({ type: 'whitespace', text: line.slice(lastIndex, match.index) });
+    }
+    const [, comment, str, kw, builtin, fn, num, punct, ident] = match;
+    if (comment) tokens.push({ type: 'comment', text: comment });
+    else if (str) tokens.push({ type: 'string', text: str });
+    else if (kw) tokens.push({ type: 'keyword', text: kw });
+    else if (builtin) tokens.push({ type: 'builtin', text: builtin });
+    else if (fn) tokens.push({ type: 'function', text: fn });
+    else if (num) tokens.push({ type: 'number', text: num });
+    else if (punct) tokens.push({ type: 'punctuation', text: punct });
+    else if (ident) tokens.push({ type: 'identifier', text: ident });
+    lastIndex = tokenRegex.lastIndex;
+  }
+  if (lastIndex < line.length) {
+    tokens.push({ type: 'whitespace', text: line.slice(lastIndex) });
+  }
+  return tokens;
+};
+
+const deriveCorrectedCode = (finding) => {
+  const suggestedFix = typeof finding?.suggestedFix === 'string' ? finding.suggestedFix.trim() : '';
+  if (!suggestedFix || suggestedFix === 'N/A') return null;
+
+  const language = inferLanguageFromPath(finding?.filePath);
+
+  // 1. Check for fenced code block: ```[lang]\n[code]\n```
+  const fencedMatch = suggestedFix.match(/```([\w+#.-]*)\s*\r?\n([\s\S]*?)\r?\n```/);
+  if (fencedMatch) {
+    const code = fencedMatch[2].trimEnd();
+    const explanation = suggestedFix.replace(fencedMatch[0], '').trim();
+    return {
+      code,
+      language: fencedMatch[1] || language,
+      explanation: explanation || null,
+    };
+  }
+
+  // 2. Check for explicit code snippet after "For example:" or "Example:" or in backticks
+  const exampleMatch = suggestedFix.match(/(?:for\s+example|example|e\.g\.?)\s*[:,]?\s*[`"']?([\s\S]+?)[`"']?\s*$/i);
+  const backtickCodeMatch = suggestedFix.match(/`([^`\n]{8,})`/);
+
+  // 3. Extract evidence and diff context
+  const { codeExcerpt } = splitFindingEvidence(finding?.explanation);
+  const diffLines = Array.isArray(finding?.diffContext) ? finding.diffContext : [];
+  const targetIndex = diffLines.findIndex(
+    (l) => l.isTarget || (Number.isInteger(finding?.lineNumber) && l.newLineNumber === finding.lineNumber && l.lineType === 'added')
+  );
+  const targetLine = targetIndex >= 0 ? diffLines[targetIndex] : null;
+  const targetCode = targetLine ? targetLine.code : (codeExcerpt || '');
+
+  // 4. Derive replacement for targetCode
+  let replacedTargetCode = null;
+
+  if (/\b(?:textContent|sanitize)\b/i.test(suggestedFix) && /\.innerHTML\b/.test(targetCode)) {
+    replacedTargetCode = targetCode.replace(/\.innerHTML\b/g, '.textContent');
+  } else if (/\bstrict\s+equality\b|\b===\b/i.test(suggestedFix) && /\s==\s/.test(targetCode)) {
+    replacedTargetCode = targetCode.replace(/\s==\s/g, ' === ');
+  } else if (/\bstrict\s+inequality\b|\b!==\b/i.test(suggestedFix) && /\s!=\s/.test(targetCode)) {
+    replacedTargetCode = targetCode.replace(/\s!=\s/g, ' !== ');
+  } else if (/\bJSON\.parse\b/i.test(suggestedFix) && /\beval\s*\(/.test(targetCode)) {
+    replacedTargetCode = targetCode.replace(/\beval\s*\(/g, 'JSON.parse(');
+  } else if (exampleMatch && exampleMatch[1].trim()) {
+    const rawExample = exampleMatch[1].trim().replace(/^`|`$/g, '');
+    if (rawExample.includes(';') || rawExample.includes('=') || rawExample.includes('(')) {
+      replacedTargetCode = rawExample;
+    }
+  } else if (backtickCodeMatch && backtickCodeMatch[1].trim()) {
+    const rawExample = backtickCodeMatch[1].trim();
+    if (rawExample.includes(';') || rawExample.includes('=') || rawExample.includes('(')) {
+      replacedTargetCode = rawExample;
+    }
+  }
+
+  // 5. If we have a replaced line and diffLines has enclosing block (e.g. function):
+  if (replacedTargetCode !== null && targetIndex >= 0) {
+    let blockStart = targetIndex;
+    for (let i = targetIndex - 1; i >= 0; i--) {
+      const c = diffLines[i].code.trim();
+      if (/^(?:(?:export\s+)?(?:default\s+)?(?:async\s+)?function\b|(?:const|let|var)\s+\w+\s*=\s*(?:async\s*)?\([^)]*\)\s*=>)/.test(c)) {
+        blockStart = i;
+        break;
+      }
+    }
+    let blockEnd = targetIndex;
+    for (let i = targetIndex + 1; i < diffLines.length; i++) {
+      const c = diffLines[i].code.trim();
+      if (c === '}' || c === '};') {
+        blockEnd = i;
+        break;
+      }
+    }
+
+    if (blockStart < targetIndex && blockEnd > targetIndex) {
+      const lines = [];
+      for (let i = blockStart; i <= blockEnd; i++) {
+        if (i === targetIndex) {
+          lines.push(`    ${replacedTargetCode.trim()}`);
+        } else {
+          lines.push(diffLines[i].code);
+        }
+      }
+      return {
+        code: lines.join('\n'),
+        language,
+        explanation: suggestedFix,
+      };
+    }
+
+    return {
+      code: replacedTargetCode.trim(),
+      language,
+      explanation: suggestedFix,
+    };
+  }
+
+  if (replacedTargetCode !== null) {
+    return {
+      code: replacedTargetCode.trim(),
+      language,
+      explanation: suggestedFix,
+    };
+  }
+
+  // Do not invent code when there is not enough information
+  return {
+    code: null,
+    language,
+    explanation: suggestedFix,
+  };
+};
+
+function SyntaxHighlightedCode({ code }) {
+  const lines = typeof code === 'string' ? code.split('\n') : [];
+  return (
+    <pre className="overflow-x-auto whitespace-pre font-mono text-xs leading-6 text-slate-200">
+      <code>
+        {lines.map((line, lineIdx) => {
+          const tokens = tokenizeCodeLine(line);
+          return (
+            <div key={lineIdx} className="min-h-[1.5rem]">
+              {tokens.length === 0 ? '\u00A0' : tokens.map((token, tokenIdx) => {
+                let tokenClass = 'text-slate-200';
+                if (token.type === 'keyword') tokenClass = 'text-purple-400 font-medium';
+                else if (token.type === 'builtin') tokenClass = 'text-amber-300';
+                else if (token.type === 'function') tokenClass = 'text-blue-300';
+                else if (token.type === 'string') tokenClass = 'text-emerald-300';
+                else if (token.type === 'number') tokenClass = 'text-orange-300';
+                else if (token.type === 'comment') tokenClass = 'text-slate-500 italic';
+                else if (token.type === 'punctuation') tokenClass = 'text-slate-400';
+                else if (token.type === 'identifier') tokenClass = 'text-sky-200';
+                return (
+                  <span key={tokenIdx} className={tokenClass}>
+                    {token.text}
+                  </span>
+                );
+              })}
+            </div>
+          );
+        })}
+      </code>
+    </pre>
+  );
+}
+
 function SuggestedFixGuidance({
-  suggestedFix
+  finding,
+  suggestedFix: directSuggestedFix
 }) {
+  const suggestedFix = typeof directSuggestedFix === 'string' ? directSuggestedFix : (finding?.suggestedFix || '');
   const [copyStatus, setCopyStatus] = useState('');
+
   useEffect(() => {
     if (!copyStatus) return undefined;
     const timeout = window.setTimeout(() => setCopyStatus(''), 2200);
     return () => window.clearTimeout(timeout);
   }, [copyStatus]);
+
   if (typeof suggestedFix !== 'string' || !suggestedFix.trim() || suggestedFix === 'N/A') {
     return null;
   }
-  const fencedCode = suggestedFix.trim().match(/^```([\w+#.-]*)\s*\r?\n([\s\S]*?)\r?\n```$/);
-  const displayedSuggestion = fencedCode ? fencedCode[2] : suggestedFix;
-  const language = fencedCode?.[1] || '';
-  const copySuggestion = async () => {
+
+  const fixInfo = deriveCorrectedCode({ ...finding, suggestedFix });
+
+  const copyFix = async () => {
     try {
       if (!navigator.clipboard?.writeText) {
         throw new Error('Clipboard access is unavailable.');
       }
-      await navigator.clipboard.writeText(suggestedFix);
+      const textToCopy = fixInfo?.code || suggestedFix;
+      await navigator.clipboard.writeText(textToCopy);
       setCopyStatus('copied');
     } catch {
       setCopyStatus('error');
     }
   };
-  return <section className="overflow-hidden rounded-lg border border-emerald-400/20 bg-emerald-500/[0.035]" aria-label="Suggested fix">
-    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-emerald-400/15 px-3 py-2">
-      <div className="flex min-w-0 items-center gap-2">
-        <h3 className="text-sm font-semibold text-emerald-200">Suggested Fix</h3>
-        {language && <span className="rounded bg-emerald-400/10 px-2 py-0.5 font-mono text-[10px] text-emerald-200/80">{language}</span>}
+
+  if (!fixInfo || !fixInfo.code) {
+    return (
+      <section className="overflow-hidden rounded-lg border border-cg-border bg-cg-surface/40" aria-label="Suggested fix">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-cg-border bg-cg-surface px-3 py-2">
+          <div className="flex min-w-0 items-center gap-2">
+            <h3 className="text-sm font-semibold text-cg-primary">Suggested Fix</h3>
+          </div>
+          <button
+            type="button"
+            onClick={copyFix}
+            className="inline-flex items-center gap-1.5 rounded-md border border-cg-border bg-cg-raised px-2.5 py-1.5 text-[11px] font-medium text-cg-primary transition hover:bg-cg-border/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+          >
+            {copyStatus === 'copied' ? <Check className="h-3 w-3 text-emerald-400" aria-hidden="true" /> : <Copy className="h-3 w-3" aria-hidden="true" />}
+            {copyStatus === 'copied' ? 'Copied' : 'Copy guidance'}
+          </button>
+        </div>
+        <div className="px-3 py-3">
+          <p className="whitespace-pre-wrap break-words text-xs leading-relaxed text-cg-primary">{suggestedFix}</p>
+        </div>
+        {copyStatus === 'copied' && (
+          <p className="border-t border-cg-border px-3 py-2 text-xs text-emerald-400" role="status" aria-live="polite">
+            Guidance copied to clipboard.
+          </p>
+        )}
+        {copyStatus === 'error' && (
+          <p className="border-t border-red-400/20 px-3 py-2 text-xs text-red-300" role="alert">
+            Could not copy guidance. Check your browser clipboard permissions.
+          </p>
+        )}
+      </section>
+    );
+  }
+
+  return (
+    <section className="overflow-hidden rounded-lg border border-emerald-400/25 bg-emerald-500/[0.035]" aria-label="Suggested fix">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-emerald-400/15 bg-emerald-500/[0.05] px-3 py-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <h3 className="text-sm font-semibold text-emerald-200">Suggested Fix</h3>
+          {fixInfo.language && (
+            <span className="rounded bg-emerald-400/10 px-2 py-0.5 font-mono text-[10px] uppercase text-emerald-200/90 border border-emerald-400/20">
+              {fixInfo.language}
+            </span>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={copyFix}
+          className="inline-flex items-center gap-1.5 rounded-md border border-emerald-400/25 bg-emerald-400/[0.08] px-2.5 py-1.5 text-[11px] font-medium text-emerald-200 transition hover:bg-emerald-400/15 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300"
+        >
+          {copyStatus === 'copied' ? <Check className="h-3 w-3 text-emerald-300" aria-hidden="true" /> : <Copy className="h-3 w-3" aria-hidden="true" />}
+          {copyStatus === 'copied' ? 'Copied' : 'Copy Fix'}
+        </button>
       </div>
-      <button type="button" onClick={copySuggestion} className="inline-flex items-center gap-1.5 rounded-md border border-emerald-400/20 bg-emerald-400/[0.06] px-2.5 py-1.5 text-[11px] font-medium text-emerald-200 transition hover:bg-emerald-400/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300">
-        <Copy className="h-3 w-3" aria-hidden="true" />
-        {copyStatus === 'copied' ? 'Copied' : 'Copy suggestion'}
-      </button>
-    </div>
-    <pre className="overflow-x-auto whitespace-pre-wrap break-words px-3 py-3 font-mono text-xs leading-relaxed text-emerald-100"><code>{displayedSuggestion}</code></pre>
-    {copyStatus === 'copied' && <p className="border-t border-emerald-400/10 px-3 py-2 text-xs text-emerald-300" role="status" aria-live="polite">Suggestion copied to clipboard.</p>}
-    {copyStatus === 'error' && <p className="border-t border-red-400/10 px-3 py-2 text-xs text-red-300" role="alert">Could not copy the suggestion. Check your browser clipboard permissions and try again.</p>}
-  </section>;
+
+      <div className="bg-slate-950/85 p-3 font-mono text-xs leading-6 overflow-x-auto">
+        <SyntaxHighlightedCode code={fixInfo.code} />
+      </div>
+
+      {fixInfo.explanation && (
+        <div className="border-t border-emerald-400/15 bg-emerald-500/[0.02] px-3 py-2.5">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-emerald-300/80">Explanation</p>
+          <p className="mt-0.5 text-xs leading-relaxed text-emerald-100/90 whitespace-pre-wrap">{fixInfo.explanation}</p>
+        </div>
+      )}
+
+      {copyStatus === 'copied' && (
+        <p className="border-t border-emerald-400/10 px-3 py-2 text-xs text-emerald-300" role="status" aria-live="polite">
+          Corrected code copied to clipboard.
+        </p>
+      )}
+      {copyStatus === 'error' && (
+        <p className="border-t border-red-400/10 px-3 py-2 text-xs text-red-300" role="alert">
+          Could not copy fix. Check your browser clipboard permissions and try again.
+        </p>
+      )}
+    </section>
+  );
 }
+
 function ReviewDiffContext({ finding }) {
   const lines = Array.isArray(finding?.diffContext) ? finding.diffContext : [];
   if (!lines.length) return null;
+
+  const hasExplicitTarget = lines.some((line) => Boolean(line.isTarget));
+  const targetLineNumber = Number.isInteger(finding?.lineNumber)
+    ? finding.lineNumber
+    : lines.find((l) => l.isTarget)?.newLineNumber;
 
   return <section className="min-w-0 rounded-lg border border-cg-border" aria-label="Pull request diff context">
     <div className="border-b border-cg-border bg-cg-surface px-3 py-2">
       <h3 className="text-sm font-semibold text-cg-primary">Code Diff</h3>
     </div>
     <div className="flex flex-wrap items-center justify-between gap-2 border-b border-cg-border/80 bg-cg-raised/50 px-3 py-2">
-      <p className="truncate font-mono text-xs text-cg-primary" title={finding.filePath}>{finding.filePath}</p>
-      {!lines.some(line => line.isTarget) && <span className="text-[11px] text-cg-muted">No validated changed-line location</span>}
+      <p className="truncate font-mono text-xs text-cg-primary" title={finding.filePath}>
+        {finding.filePath}{Number.isInteger(targetLineNumber) ? `:${targetLineNumber}` : ''}
+      </p>
+      {lines.some((line) => line.isTarget || line.newLineNumber === targetLineNumber) ? (
+        <span className="inline-flex items-center gap-1.5 rounded border border-red-500/30 bg-red-500/10 px-2 py-0.5 text-[11px] font-medium text-red-300">
+          <span className="h-1.5 w-1.5 rounded-full bg-red-500" aria-hidden="true" />
+          Line {targetLineNumber} flagged
+        </span>
+      ) : (
+        <span className="text-[11px] text-cg-muted">No validated changed-line location</span>
+      )}
     </div>
     <div className="overflow-x-auto bg-cg-background">
       <div className="min-w-[560px] py-1 font-mono text-xs leading-6">
@@ -528,21 +817,62 @@ function ReviewDiffContext({ finding }) {
         {lines.map((line, index) => {
           const added = line.lineType === 'added';
           const removed = line.lineType === 'removed';
-          const target = Boolean(line.isTarget && added);
-          const lineStyle = target
-            ? 'border-l-2 border-blue-400 bg-blue-500/15 text-blue-50'
+          const isVulnerable = Boolean(
+            line.isTarget ||
+            (!hasExplicitTarget &&
+              Number.isInteger(targetLineNumber) &&
+              line.newLineNumber === targetLineNumber &&
+              line.lineType !== 'removed')
+          );
+          const lineStyle = isVulnerable
+            ? 'border-l-[3px] border-red-500 bg-red-500/15 text-red-50 font-medium'
             : added
               ? 'border-l-2 border-emerald-400/60 bg-emerald-500/[0.08] text-emerald-100'
               : removed
                 ? 'border-l-2 border-red-400/50 bg-red-500/[0.08] text-red-100'
                 : 'border-l-2 border-transparent text-cg-primary';
           const prefix = added ? '+' : removed ? '−' : ' ';
-          return <div key={`${line.lineType}-${line.oldLineNumber ?? 'x'}-${line.newLineNumber ?? 'x'}-${index}`} className={`grid grid-cols-[3.5rem_3.5rem_1.5rem_minmax(0,1fr)] ${lineStyle}`} aria-label={target ? 'Validated finding target line' : undefined}>
-            <span className="select-none border-r border-cg-border/70 px-2 text-right text-cg-muted">{line.oldLineNumber ?? ''}</span>
-            <span className="select-none border-r border-cg-border/70 px-2 text-right text-cg-muted">{line.newLineNumber ?? ''}</span>
-            <span className="select-none text-center text-cg-muted">{prefix}</span>
-            <code className="overflow-x-visible whitespace-pre px-2">{line.code}{line.truncated ? <span className="ml-2 text-cg-muted">… line truncated</span> : null}</code>
-          </div>;
+          return (
+            <div
+              key={`${line.lineType}-${line.oldLineNumber ?? 'x'}-${line.newLineNumber ?? 'x'}-${index}`}
+              className={`grid grid-cols-[3.5rem_3.5rem_1.5rem_minmax(0,1fr)] ${lineStyle}`}
+              aria-label={isVulnerable ? `Vulnerable code at line ${line.newLineNumber ?? ''}` : undefined}
+            >
+              <span className={`select-none border-r border-cg-border/70 px-2 text-right ${isVulnerable ? 'text-red-300 font-medium' : 'text-cg-muted'}`}>
+                {line.oldLineNumber ?? ''}
+              </span>
+              <span className={`select-none border-r border-cg-border/70 px-2 text-right ${isVulnerable ? 'text-red-300 font-medium' : 'text-cg-muted'}`}>
+                {line.newLineNumber ?? ''}
+              </span>
+              <span className={`select-none text-center ${isVulnerable ? 'font-bold text-red-400' : 'text-cg-muted'}`}>
+                {prefix}
+              </span>
+              <code className={`overflow-x-visible whitespace-pre px-2 ${isVulnerable ? 'text-red-100 font-semibold' : ''}`}>
+                {tokenizeCodeLine(line.code).map((token, tokenIdx) => {
+                  let tokenClass = isVulnerable ? 'text-red-100' : 'text-cg-primary';
+                  if (!isVulnerable) {
+                    if (token.type === 'keyword') tokenClass = 'text-purple-400 font-medium';
+                    else if (token.type === 'builtin') tokenClass = 'text-amber-300';
+                    else if (token.type === 'function') tokenClass = 'text-blue-300';
+                    else if (token.type === 'string') tokenClass = added ? 'text-emerald-200' : 'text-emerald-300';
+                    else if (token.type === 'number') tokenClass = 'text-orange-300';
+                    else if (token.type === 'comment') tokenClass = 'text-slate-500 italic';
+                    else if (token.type === 'punctuation') tokenClass = 'text-slate-400';
+                    else if (token.type === 'identifier') tokenClass = 'text-sky-200';
+                  } else {
+                    if (token.type === 'keyword') tokenClass = 'text-purple-200 font-semibold';
+                    else if (token.type === 'builtin') tokenClass = 'text-amber-200 font-semibold';
+                    else if (token.type === 'function') tokenClass = 'text-blue-200 font-semibold';
+                    else if (token.type === 'string') tokenClass = 'text-emerald-200';
+                    else if (token.type === 'punctuation') tokenClass = 'text-red-300/80';
+                    else if (token.type === 'identifier') tokenClass = 'text-red-50 font-bold';
+                  }
+                  return <span key={tokenIdx} className={tokenClass}>{token.text}</span>;
+                })}
+                {line.truncated ? <span className="ml-2 text-cg-muted">… line truncated</span> : null}
+              </code>
+            </div>
+          );
         })}
       </div>
     </div>
@@ -556,9 +886,12 @@ function ReviewFindingDetails({ finding }) {
   return <div className="min-w-0 space-y-5">
     {hasDiffContext
       ? <ReviewDiffContext finding={finding} />
-      : evidence.codeExcerpt && <section className="min-w-0" aria-label="Code evidence">
-        <h3 className="text-xs font-medium text-cg-muted">Evidence excerpt</h3>
-        <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-words border-l-2 border-cg-border bg-cg-surface px-3 py-2 font-mono text-xs leading-relaxed text-cg-primary"><code>{evidence.codeExcerpt}</code></pre>
+      : evidence.codeExcerpt && <section className="min-w-0 rounded-lg border border-red-500/30 overflow-hidden" aria-label="Code evidence">
+        <div className="border-b border-red-500/20 bg-red-500/10 px-3 py-2 flex items-center justify-between">
+          <h3 className="text-xs font-semibold text-red-200">Flagged Evidence</h3>
+          {finding.filePath && <span className="font-mono text-[11px] text-red-300/80">{finding.filePath}{finding.lineNumber ? `:${finding.lineNumber}` : ''}</span>}
+        </div>
+        <pre className="overflow-x-auto whitespace-pre-wrap break-words border-l-[3px] border-red-500 bg-red-500/[0.08] px-3 py-2.5 font-mono text-xs leading-relaxed text-red-100"><code>{evidence.codeExcerpt}</code></pre>
       </section>}
     <section className="overflow-hidden rounded-lg border border-cg-border bg-cg-raised/45" aria-label="Why this finding matters">
       <div className="flex items-center gap-2 border-b border-cg-border px-3 py-2.5">
@@ -567,7 +900,7 @@ function ReviewFindingDetails({ finding }) {
       </div>
       <p className="whitespace-pre-wrap break-words px-3 py-3 text-sm leading-relaxed text-cg-primary">{evidence.explanation || finding.explanation || 'No explanation was saved for this finding.'}</p>
     </section>
-    <SuggestedFixGuidance suggestedFix={finding.suggestedFix} />
+    <SuggestedFixGuidance finding={finding} suggestedFix={finding.suggestedFix} />
   </div>;
 }
 
