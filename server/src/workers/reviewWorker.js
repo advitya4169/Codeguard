@@ -1,6 +1,5 @@
 
-import { Worker } from "bullmq";
-import Groq from "groq-sdk";
+import { UnrecoverableError, Worker } from "bullmq";
 import dotenv from "dotenv";
 
 import { redisConnection } from "../config/redis.js";
@@ -14,6 +13,13 @@ import {
   postPRComment,
 } from '../services/githubService.js';
 import { getInstallationAccessToken } from '../services/githubAppService.js';
+import {
+  analyzeDiffWithGroq,
+  calculateReviewBackoff,
+  extractRateLimitRetryMs,
+  isPermanentError,
+  GroqTruncatedResponseError,
+} from '../services/groqService.js';
 import { cleanDiff } from "../analyzers/staticAnalyzer.js";
 import { createFindingDiffContextExtractor, validateFindingsForReview } from "../analyzers/diffFindingValidator.js";
 import { createGitHubReviewPublisher } from '../services/githubReviewPublisher.js';
@@ -24,14 +30,6 @@ import Repository from "../models/Repository.js";
 import Installation from "../models/Installation.js";
 
 dotenv.config({ quiet: true });
-
-if (!process.env.GROQ_API_KEY) {
-  throw new Error("GROQ_API_KEY is not defined in .env");
-}
-
-const groq = new Groq({
-  apiKey: process.env.GROQ_API_KEY,
-});
 
 const MODEL = "openai/gpt-oss-20b";
 // The configured model has a 131,072-token context window. Keep the diff below
@@ -57,95 +55,9 @@ const allowedSeverities = [
 
 // Ask Groq to review a diff and return structured findings.
 async function analyzeDiff(diff) {
-  const prompt = `
-Review this Git diff as a senior software engineer.
-
-Identify genuine:
-- Bugs
-- Security vulnerabilities
-- Performance issues
-- Code quality problems
-- Maintainability issues
-
-Base every finding on specific code shown in the supplied diff. Start each explanation with Evidence: followed by an exact short code excerpt enclosed in backticks, then a dash and how that code causes the issue. Do not infer behavior in files or code the diff does not show, or report claims contradicted by the diff.
-Use an exact file path and the new-side line containing the cited code. Prefer the actual vulnerable statement over nearby braces, imports, or declarations. If no reliable location is visible, omit the finding.
-Do not claim syntax errors, undefined variables, incomplete implementations, or filename conflicts without direct evidence. Check that a claimed undefined name is not declared in the shown code. Test and fixture files remain valid review targets; describe risks in their test/example context and do not imply production impact without evidence.
-If no genuine issues exist, return an empty findings array.
-
-Return exactly one JSON object in this format:
-{
-  "findings": [
-    {
-      "title": "SQL injection in search query",
-      "category": "bug",
-      "severity": "high",
-      "filePath": "src/example.js",
-      "lineNumber": 10,
-      "explanation": "Evidence: [exact code excerpt in backticks] — explain how it causes the issue",
-      "suggestedFix": "Explain how to fix it"
-    }
-  ]
-}
-
-Allowed categories: ${allowedCategories.join(", ")}.
-Allowed severities: ${allowedSeverities.join(", ")}.
-
-Return JSON only. No Markdown fences or surrounding explanation.
-
-Git diff:
-${diff}
-`;
-
-  const completion = await groq.chat.completions.create({
-    model: MODEL,
-    messages: [
-      {
-        role: "system",
-        content:
-          "You are an expert code reviewer. Review only evidence present in the supplied diff. Return one valid JSON object with a findings array. Each finding should include a concise title of at most 8 words, category, severity, exact diff filePath, positive new-side diff lineNumber, explanation, and suggestedFix. Start explanation with Evidence: `exact short code excerpt from the cited line` — then explain how that code causes the issue. Do not invent or speculate; reject claims contradicted by the diff. Do not claim syntax errors, undefined variables, incomplete implementations, or filename conflicts without direct evidence. Assess test/fixture code in its actual context and do not imply production impact without evidence. Omit findings without a reliable location. Return only JSON.",
-      },
-      {
-        role: "user",
-        content: prompt,
-      },
-    ],
-    temperature: 0,
-    max_completion_tokens: 8192,
+  return analyzeDiffWithGroq(diff, {
+    parseResponseFn: parseReviewResponse,
   });
-
-  const choice = completion.choices?.[0];
-  const message = choice?.message;
-
-  // Diagnostic metadata helps explain empty model responses.
-  // Do not log the API key or the full diff.
-  console.log("Groq response diagnostics:", {
-    model: completion.model,
-    finishReason: choice?.finish_reason,
-    contentType: typeof message?.content,
-    contentLength:
-      typeof message?.content === "string"
-        ? message.content.length
-        : 0,
-    refusal: Boolean(message?.refusal),
-    reasoningPresent: Boolean(message?.reasoning),
-    usage: completion.usage,
-  });
-
-  if (message?.refusal) {
-    throw new Error(`Groq refused the review: ${message.refusal}`);
-  }
-
-  const responseText = message?.content;
-
-  if (typeof responseText !== "string" || !responseText.trim()) {
-    throw new Error(
-      `Groq returned no review text. Finish reason: ${
-        choice?.finish_reason ?? "unknown"
-      }`
-    );
-  }
-
-  return parseReviewResponse(responseText);
 }
 
 const normalizeFindingTitle = (title) => {
@@ -157,12 +69,23 @@ const normalizeFindingTitle = (title) => {
   return normalized;
 };
 
-export const parseReviewResponse = (responseText) => {
+export const parseReviewResponse = (responseText, choice = null) => {
+  if (choice?.finish_reason === "length") {
+    throw new GroqTruncatedResponseError(
+      "Groq review response was truncated because the completion token limit was reached."
+    );
+  }
+
   let result;
 
   try {
     result = JSON.parse(responseText);
   } catch {
+    if (choice?.finish_reason === "length") {
+      throw new GroqTruncatedResponseError(
+        "Groq review response was truncated because the completion token limit was reached."
+      );
+    }
     console.error("Groq returned invalid JSON.");
     throw new Error("Groq returned invalid JSON");
   }
@@ -575,27 +498,51 @@ export const createReviewProcessor = ({
 
       // Keep the persisted state aligned with BullMQ's automatic retry lifecycle.
       if (reviewJob) {
-        const hasAutomaticRetry = Number.isInteger(job?.opts?.attempts) &&
+        const permanent = isPermanentError(error);
+        const hasAutomaticRetry = !permanent &&
+          Number.isInteger(job?.opts?.attempts) &&
           Number.isInteger(job?.attemptsMade) &&
           job.attemptsMade + 1 < job.opts.attempts;
+
+        const rateLimitMs = extractRateLimitRetryMs(error);
+        const retryDelaySec = rateLimitMs ? Math.round(rateLimitMs / 1000) : null;
+
         reviewJob.status = hasAutomaticRetry ? "queued" : "failed";
         reviewJob.summary = hasAutomaticRetry
-          ? "Review attempt failed. Another automatic attempt is queued."
+          ? (retryDelaySec ? `Rate limit reached. Automatic retry scheduled in ${retryDelaySec}s.` : "Review attempt failed. Another automatic attempt is queued.")
           : error.message;
         await reviewJob.save();
+
+        if (permanent) {
+          const unrecoverable = new UnrecoverableError(error.message);
+          unrecoverable.cause = error;
+          throw unrecoverable;
+        }
+
+        if (job?.opts?.backoff) {
+          job.opts.backoff = {
+            ...job.opts.backoff,
+            type: 'custom',
+          };
+        }
       }
 
       throw error;
     }
   };
 
-export const startReviewWorker = () => {
+export const startReviewWorker = (overrides = {}) => {
   const worker = new Worker(
     REVIEW_QUEUE_NAME,
     createReviewProcessor(),
     {
       connection: redisConnection,
       concurrency: 5,
+      ...overrides,
+      settings: {
+        backoffStrategy: calculateReviewBackoff,
+        ...overrides.settings,
+      },
     },
   );
 

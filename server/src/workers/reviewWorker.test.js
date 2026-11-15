@@ -1,9 +1,11 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
+import { Backoffs } from 'bullmq';
 import { redisConnection } from '../config/redis.js';
+import { calculateReviewBackoff } from '../services/groqService.js';
 
 process.env.GROQ_API_KEY ||= 'test-only-key';
-const { createReviewProcessor, MAX_REVIEW_DIFF_BYTES, parseReviewResponse } = await import('./reviewWorker.js');
+const { createReviewProcessor, MAX_REVIEW_DIFF_BYTES, parseReviewResponse, startReviewWorker } = await import('./reviewWorker.js');
 after(() => redisConnection.disconnect());
 
 const commitSha = 'a'.repeat(40);
@@ -292,4 +294,117 @@ test('GitHub publishing failures keep persisted analysis complete and do not rep
   assert.equal(harness.persistedFindings.length, 2);
   assert.equal(harness.reviewDocument.status, 'completed');
   assert.equal(harness.reviewDocument.githubPublicationStatus, 'uncertain');
+});
+
+test('parseReviewResponse throws GroqTruncatedResponseError when finish_reason is length', () => {
+  assert.throws(
+    () => parseReviewResponse('{"findings": [{"title": "Truncated', { finish_reason: 'length' }),
+    (err) => {
+      assert.equal(err.name, 'GroqTruncatedResponseError');
+      assert.equal(err.finishReason, 'length');
+      assert.match(err.message, /token limit was reached/);
+      return true;
+    },
+  );
+});
+
+test('handles rate-limit 429 response by switching backoff to custom and reporting scheduled retry in summary', async () => {
+  const rateLimitError = new Error('Rate limit reached');
+  rateLimitError.status = 429;
+  rateLimitError.headers = { 'retry-after': '30' };
+
+  const harness = createHarness({
+    overrides: {
+      analyzeDiffFn: async () => {
+        throw rateLimitError;
+      },
+    },
+  });
+
+  harness.job.opts.attempts = 3;
+  harness.job.attemptsMade = 0;
+  harness.job.opts.backoff = { type: 'exponential', delay: 5000 };
+
+  await assert.rejects(harness.processor(harness.job), /Rate limit reached/);
+  assert.equal(harness.reviewDocument.status, 'queued');
+  assert.match(harness.reviewDocument.summary, /Rate limit reached\. Automatic retry scheduled in 30s\./);
+  assert.equal(harness.job.opts.backoff.type, 'custom');
+});
+
+test('marks permanent error as unrecoverable without automatic retries', async () => {
+  const authError = new Error('Invalid API Key');
+  authError.status = 401;
+
+  const harness = createHarness({
+    overrides: {
+      analyzeDiffFn: async () => {
+        throw authError;
+      },
+    },
+  });
+
+  harness.job.opts.attempts = 3;
+  harness.job.attemptsMade = 0;
+
+  await assert.rejects(
+    harness.processor(harness.job),
+    (err) => {
+      assert.equal(err.name, 'UnrecoverableError');
+      return true;
+    },
+  );
+  assert.equal(harness.reviewDocument.status, 'failed');
+  assert.match(harness.reviewDocument.summary, /Invalid API Key/);
+});
+
+test('startReviewWorker registers calculateReviewBackoff under settings.backoffStrategy while preserving concurrency', async () => {
+  const worker = startReviewWorker({
+    autorun: false,
+    connection: { host: '127.0.0.1', port: 6379, lazyConnect: true },
+  });
+  try {
+    assert.equal(worker.opts.concurrency, 5);
+    assert.equal(worker.opts.settings?.backoffStrategy, calculateReviewBackoff);
+  } finally {
+    await worker.close();
+  }
+});
+
+test('registered worker backoffStrategy calculates custom delayed retry for HTTP 429 rate-limit errors', async () => {
+  const worker = startReviewWorker({
+    autorun: false,
+    connection: { host: '127.0.0.1', port: 6379, lazyConnect: true },
+  });
+
+  try {
+    const registeredStrategy = worker.opts.settings?.backoffStrategy;
+    assert.equal(typeof registeredStrategy, 'function');
+
+    const rateLimitError = new Error('Rate limit reached');
+    rateLimitError.status = 429;
+    rateLimitError.headers = { 'retry-after': '45' };
+
+    const job = {
+      attemptsMade: 1,
+      opts: {
+        backoff: { type: 'custom', delay: 5000 },
+      },
+    };
+
+    // Verify registered strategy directly
+    const directDelay = registeredStrategy(job.attemptsMade, 'custom', rateLimitError, job);
+    assert.equal(directDelay, 45_000);
+
+    // Verify with BullMQ Backoffs.calculate using the worker's registered strategy
+    const calculatedDelay = Backoffs.calculate(
+      job.opts.backoff,
+      job.attemptsMade,
+      rateLimitError,
+      job,
+      registeredStrategy,
+    );
+    assert.equal(calculatedDelay, 45_000);
+  } finally {
+    await worker.close();
+  }
 });
