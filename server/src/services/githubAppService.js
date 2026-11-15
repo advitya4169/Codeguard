@@ -107,20 +107,28 @@ const normalizeInstallationId = (installationId) => {
   return value;
 };
 
-/**
- * Requests a short-lived installation token. The token is returned to the caller
- * in memory and is never logged or persisted by this helper.
- */
-export const getInstallationAccessToken = async (
-  installationId,
-  { fetchImpl = globalThis.fetch } = {},
-) => {
-  const normalizedInstallationId = normalizeInstallationId(installationId);
-  const appJwt = generateGitHubAppJWT();
+export const TOKEN_EXPIRATION_BUFFER_MS = 5 * 60 * 1000;
 
+const installationTokenCache = new Map();
+const inFlightTokenRequests = new Map();
+
+export const clearInstallationTokenCache = () => {
+  installationTokenCache.clear();
+  inFlightTokenRequests.clear();
+};
+
+const requestInstallationToken = async (
+  normalizedInstallationId,
+  {
+    fetchImpl = globalThis.fetch,
+    generateJwtFn = generateGitHubAppJWT,
+  } = {},
+) => {
   if (typeof fetchImpl !== 'function') {
     throw new Error('GitHub App token request could not be completed.');
   }
+
+  const appJwt = generateJwtFn();
 
   let response;
   try {
@@ -166,6 +174,69 @@ export const getInstallationAccessToken = async (
     token: result.token,
     expiresAt: result.expires_at,
   };
+};
+
+/**
+ * Requests a short-lived installation token, caching valid tokens until 5 minutes
+ * before expiration and coalescing concurrent in-flight requests. The token is
+ * returned to the caller in memory and is never logged or persisted.
+ */
+export const getInstallationAccessToken = async (
+  installationId,
+  {
+    fetchImpl = globalThis.fetch,
+    generateJwtFn = generateGitHubAppJWT,
+    nowFn = Date.now,
+    bufferMs = TOKEN_EXPIRATION_BUFFER_MS,
+  } = {},
+) => {
+  const normalizedInstallationId = normalizeInstallationId(installationId);
+  const now = typeof nowFn === 'function' ? nowFn() : Date.now();
+
+  const cached = installationTokenCache.get(normalizedInstallationId);
+  if (cached) {
+    if (cached.expiresAtMs - now > bufferMs) {
+      return {
+        token: cached.token,
+        expiresAt: cached.expiresAt,
+      };
+    }
+    // Expired or inside the 5-minute safety window; evict stale entry.
+    installationTokenCache.delete(normalizedInstallationId);
+  }
+
+  const inFlight = inFlightTokenRequests.get(normalizedInstallationId);
+  if (inFlight) {
+    return await inFlight;
+  }
+
+  const tokenPromise = (async () => {
+    try {
+      const tokenResult = await requestInstallationToken(normalizedInstallationId, {
+        fetchImpl,
+        generateJwtFn,
+      });
+
+      const expiresAtMs = Date.parse(tokenResult.expiresAt);
+      const currentTime = typeof nowFn === 'function' ? nowFn() : Date.now();
+
+      // Only cache if the token is valid beyond the safety refresh window.
+      if (expiresAtMs - currentTime > bufferMs) {
+        installationTokenCache.set(normalizedInstallationId, {
+          token: tokenResult.token,
+          expiresAt: tokenResult.expiresAt,
+          expiresAtMs,
+        });
+      }
+
+      return tokenResult;
+    } finally {
+      inFlightTokenRequests.delete(normalizedInstallationId);
+    }
+  })();
+
+  inFlightTokenRequests.set(normalizedInstallationId, tokenPromise);
+  return await tokenPromise;
 };
 
 /** Fetches and validates the GitHub App installation metadata using an App JWT. */
