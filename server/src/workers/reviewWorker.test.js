@@ -365,6 +365,8 @@ test('startReviewWorker registers calculateReviewBackoff under settings.backoffS
   try {
     assert.equal(worker.opts.concurrency, 5);
     assert.equal(worker.opts.settings?.backoffStrategy, calculateReviewBackoff);
+    assert.deepEqual(worker.opts.removeOnComplete, { count: 100 });
+    assert.deepEqual(worker.opts.removeOnFail, { age: 604800, count: 500 });
   } finally {
     await worker.close();
   }

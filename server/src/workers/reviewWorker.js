@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 
 import { redisConnection } from "../config/redis.js";
 import { REVIEW_QUEUE_NAME } from "../config/queueNames.js";
+import { DEFAULT_JOB_OPTIONS } from "../config/queue.js";
 import {
   createPRReview,
   getPRDiff,
@@ -538,6 +539,8 @@ export const startReviewWorker = (overrides = {}) => {
     {
       connection: redisConnection,
       concurrency: 5,
+      removeOnComplete: DEFAULT_JOB_OPTIONS.removeOnComplete,
+      removeOnFail: DEFAULT_JOB_OPTIONS.removeOnFail,
       ...overrides,
       settings: {
         backoffStrategy: calculateReviewBackoff,
